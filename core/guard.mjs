@@ -1,12 +1,12 @@
 /**
- * core/guard.mjs — 完整性闸（ADR-34 / ADR-35）+ global.json 四态判定（S0.7）。
+ * core/guard.mjs — 完整性闸 + global.json 四态判定。
  *
  * 为什么需要它：per-record 布局的读路径对"JSON 坏"和"版本戳不被接受"一律返回 undefined
  * （dsh-storage-json/src/format.ts L117-128），loadAll 直接当这条记录不存在。
  * invalidRecords:'backup-and-skip' 只在 zod 校验失败时触发，**拦不到这两种情况**。
  * 所以"版本不兼容 = 空库"在域层眼里是合法的空库，只能靠数磁盘文件发现。
  *
- * S0.7 新增：global.json 缺失时的保护。
+ * global.json 缺失时的保护。
  * 域层在 global.json 缺失/损坏时会把 global 回落成 initial（created_at 空、expected_counts null），
  * 从内存看与"全新库"完全一样。两者只能靠磁盘事实区分，所以这里把 meta 状态判成四态：
  *   ok                    global.json 在、可解析、版本戳被接受        → 唯一可写元数据的状态
@@ -16,7 +16,7 @@
  *   version_incompatible  global.json 在、可解析、版本戳不在接受集合内 → 只读降级
  *
  * 铁律：metaState 不是 ok / new_legit 时，**一个字节都不许写进 global.json**。
- * 否则"缺失"会被我们自己补成一个正常基线，证据当场销毁（这正是 S0.7 要堵的洞）。
+ * 否则"缺失"会被我们自己补成一个正常基线，证据当场销毁（这正是要堵的洞）。
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -31,7 +31,7 @@ export const META_STATE = {
   MISSING_WITH_DATA: 'missing_with_data',
   CORRUPT: 'corrupt',
   VERSION_INCOMPATIBLE: 'version_incompatible',
-  /** 扫描本身失败：核心检查跑不了 → 保守降级（S1-lite 0a 要求）。 */
+  /** 扫描本身失败：核心检查跑不了 → 保守降级。 */
   UNAVAILABLE: 'unavailable',
 }
 
@@ -64,7 +64,7 @@ export async function scanUnit(root, { unitName = 'project', tables, acceptedVer
         out.global.version = typeof doc.version === 'number' ? doc.version : null
         out.global.stampOk = typeof doc.version === 'number' && acceptedVersions.includes(doc.version)
       } catch (e) {
-        // 解析失败与"版本戳被拒"是两件事，必须分开记（S0.7 任务书 §二.1 D）。
+        // 解析失败与"版本戳被拒"是两件事，必须分开记。
         out.global.parseOk = false
         out.global.stampOk = false
         out.global.error = String(e?.message ?? e)
@@ -109,7 +109,7 @@ export function classifyMeta(scan, { acceptedVersions = [] } = {}) {
     }
     return { ...base, state: META_STATE.OK, version: g.version }
   }
-  // .deleting 同样是"这里曾经有记录"的磁盘证据（S1-lite 缺陷 1）：
+  // .deleting 同样是"这里曾经有记录"的磁盘证据：
   // per-record 删除先把 <key>.json rename 成 <key>.json.deleting，再 unlink；
   // unlink 走 Promise.allSettled 且失败被吞（dsh-storage-json per-record-unit.ts L293-295），
   // 所以 .deleting 可以长期残留，而它已经不在可读集里（open 只读 *.json）。
@@ -129,7 +129,7 @@ export function evaluate({ scanBefore, scanAfter, domain, tables, expectedCounts
   for (const t of tables) counts[t] = domain.table(t).size
 
   // 核心判据（D1/D2/D3）依赖磁盘扫描。扫描失败 = 判据跑不了 = 保守降级，
-  // 绝不允许"查不到"被当成"没问题"（S1-lite 0a / 使用者 2026-11-14 拍板）。
+  // 绝不允许"查不到"被当成"没问题"。
   const scanOk = !!(scanAfter && scanAfter.tables && scanBefore && scanBefore.tables)
   if (!scanOk) {
     criteria.push({
@@ -167,7 +167,7 @@ export function evaluate({ scanBefore, scanAfter, domain, tables, expectedCounts
     }
   }
 
-  // ---- global.json 四态（S0.7）----
+  // ---- global.json 四态 ----
   // 判据来源是"打开前"的磁盘事实：打开动作本身会建目录，用 scanAfter 会污染判断。
   const metaClass = classifyMeta(scanBefore, { acceptedVersions })
   if (metaClass.state === META_STATE.UNAVAILABLE) {
@@ -204,7 +204,7 @@ export function evaluate({ scanBefore, scanAfter, domain, tables, expectedCounts
 
   const anyDisk = tables.some(t => (diskOf(scanAfter, t, 'json') ?? 0) > 0)
   const anyBak = tables.some(t => (diskOf(scanAfter, t, 'bak') ?? 0) > 0)
-  // 删除残留也算"这里不是空库"：legitEmpty 只允许在四种计数全 0 时成立（S1-lite 缺陷 1）。
+  // 删除残留也算"这里不是空库"：legitEmpty 只允许在四种计数全 0 时成立。
   const anyDeleting = tables.some(t => (diskOf(scanAfter, t, 'deleting') ?? 0) > 0)
   const anyMem = tables.some(t => counts[t] > 0)
   const expectedAllZeroOrNull = !expectedCounts || Object.values(expectedCounts).every(v => v === 0)

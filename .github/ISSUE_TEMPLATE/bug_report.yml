@@ -1,0 +1,69 @@
+name: Bug 报告
+description: 面板显示不对、降级红条不出现、数据异常、接口报错
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说最重要的一句：**如果涉及数据损坏或安全问题，请不要在这里贴记录内容**，改用 [私密漏洞报告](https://github.com/quietchisel/dsh-project-lite/security/advisories/new)。
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      description: 在 DSH 的「关于」里能看到，例如 0.2.2-rc.3
+      placeholder: 0.2.2-rc.3
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: Windows 11 23H2 / macOS 14.5 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 实际发生了什么
+      description: 面板显示什么？红条写什么？把红条标题和原因原文贴出来最有用。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你期望发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从"打开 DSH"开始，一步一步写。
+      placeholder: |
+        1. 打开侧栏「项目」
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: structure
+    attributes:
+      label: 数据目录结构（可选，已脱敏）
+      description: 只要目录树，**不要**贴记录文件里的业务内容。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认上面没有贴任何密钥、凭证或业务数据
+          required: true

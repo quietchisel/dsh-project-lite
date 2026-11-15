@@ -4,7 +4,7 @@
  * 保留 0a/0b：GET /api/project/state（降级原因 + 检查状态），client.js 一个字节未改。
  * 新增 1.1：4 条 exact GET 只读路由，把 core/read.mjs 的服务层结果原样交给调用方。
  *
- * 路由契约（00-今日推进计划.md §3）：
+ * 路由契约：
  *   /api/project/overview                     → service.overview()
  *   /api/project/get?id=<pid>                 → service.getProject(id)
  *   /api/project/links-of-session?session_id= → service.linksOfSession(sid)

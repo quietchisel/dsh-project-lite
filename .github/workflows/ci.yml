@@ -1,0 +1,33 @@
+# CI：语法门禁 + 界面层回归。
+#
+# 说明：core 层测试（s12 / s14）需要 @deepseek-ai/dsh-storage-domain 与 dsh-storage-json，
+# 这两个包由 DSH 运行时提供、不在公共 npm 上，所以公共 CI 里跑不了——用 `npm run test:core` 在装好 DSH 的机器上跑。
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [ '20.x', '22.x' ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Syntax check
+        run: |
+          node --check index.js
+          node --check client.js
+          for f in core/*.mjs test/*.mjs; do node --check "$f"; done
+      - name: Client regression (zero-dependency)
+        run: npm test

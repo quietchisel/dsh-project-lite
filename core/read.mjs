@@ -1,11 +1,11 @@
 /**
  * core/read.mjs —— S1 的 1.1 工作包：只读服务层。
  *
- * 契约（对应 00-今日推进计划.md §3）：
+ * 契约：
  *   1. 四个方法全部同步读内存（domain.table 的 entries），不写盘、不写元数据、不触发 reconcile。
  *   2. 返回值一律是可 JSON 序列化的纯数据快照；路由层直接 JSON.stringify，不另算一遍。
  *   3. 降级态下照常可读（degradationReport().canStill 含 read），但绝不提供任何写入口。
- *   4. 分组顺序写死 active → paused → done → archived，不做智能排序（路线图 v2 §1.3）。
+ *   4. 分组顺序写死 active → paused → done → archived，不做智能排序。
  *
  * 本文件不 import 任何 @deepseek-ai/* 包，也不 import store.mjs —— 只依赖传入的 store 对象，
  * 因此 Node 层可独立机检，不依赖宿主 Host。

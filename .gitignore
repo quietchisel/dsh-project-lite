@@ -4,6 +4,7 @@ node_modules/
 
 # 测试与本地运行产物
 _tmp/
+.tmp/
 *.log
 evidence.jsonl
 *.json.deleting

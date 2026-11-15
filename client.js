@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * S1-lite §6.5：把后端 severity 显示出来。后端原始字段一个都不改，只在标签上拼后缀。
+     * 把后端 severity 显示出来。后端原始字段一个都不改，只在标签上拼后缀。
      *   external + unverified → 「外部 · 未验证」
      *   core + degraded      → 「核心 · 降级」
      */

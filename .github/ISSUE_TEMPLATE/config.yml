@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题 / 数据损坏（不要开公开 issue）
+    url: https://github.com/quietchisel/dsh-project-lite/security/advisories/new
+    about: 走私密漏洞报告，避免公开暴露你的数据情况
+  - name: 使用与安装问题
+    url: https://github.com/quietchisel/dsh-project-lite#安装
+    about: 先看 README 的安装与已知限制两节

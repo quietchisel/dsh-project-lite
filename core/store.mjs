@@ -47,7 +47,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   }
   let scanBefore = await safeScan()
 
-  // 后端与 facility：优先用宿主注入的（插件路径），否则自己建（S0 实验路径）。
+  // 后端与 facility：优先用宿主注入的（插件路径），否则自己建（独立运行路径）。
   // 动态 import 是刻意的：走注入路径时完全不加载 @deepseek-ai/* 包。
   let backend = null
   let facility = injectedFacility
@@ -72,7 +72,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   let verdict = evaluate({ scanBefore, scanAfter, domain, tables: TABLES, expectedCounts: expected, acceptedVersions })
 
   // 降级时把"这次看到了什么"记下来（只写 last_degraded_snapshot，绝不碰 expected_counts）。
-  // S0.7 收紧：只有 meta 本身可信（ok / 全新空库）才允许写。
+  // 收紧：只有 meta 本身可信（ok / 全新空库）才允许写。
   // global.json 缺失 / 损坏 / 版本不兼容时，内存里的 meta 是 initial——写下去等于亲手把证据
   // 补成一个正常基线，下次打开就再也看不出"元数据曾经缺失"。
   if (verdict.degraded && verdict.metaSafeToWrite) {
@@ -90,7 +90,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     get counts() { return verdict.counts },
     refresh,
     /**
-     * 降级原因 → 界面契约（S1-lite 0a 的 core 侧）。
+     * 降级原因 → 界面契约（core 侧）。
      * 每一种降级都必须给出 kind / title / reason，界面据此显示红条；
      * **不允许出现"降级了但说不出原因"的状态**（那就是把不确定说成确定的反面）。
      */
@@ -104,7 +104,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   }
 
   /**
-   * 重新数磁盘 + 重算判据（S1-lite 修正，必须的）。
+   * 重新数磁盘 + 重算判据（必须的）。
    *
    * 为什么：verdict 是"打开那一刻"的快照。插件里的 store 是长期存活的，
    * 它会活过它所验证的那些条件——磁盘上 global.json 被删掉后，内存里仍然是 ok，
@@ -183,7 +183,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
 
   /**
    * 基线只在完整性被证明时写（铁律一）；降级时只写 last_degraded_snapshot。
-   * S0.7 再加一道：meta 本身不可信（缺失/损坏/版本不兼容）时**一个字节都不写**。
+   * 再加一道：meta 本身不可信（缺失/损坏/版本不兼容）时**一个字节都不写**。
    */
   async function refreshBaseline() {
     const counts = Object.fromEntries(TABLES.map(t => [t, domain.table(t).size]))
@@ -232,7 +232,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     },
 
     /**
-     * 挂会话：确定性键 → **真幂等**（S0.7 修正）。
+     * 挂会话：确定性键 → **真幂等**。
      *
      * 三种情形，行为必须完全不同：
      *   1. 键不存在             → 新建：rev=1，写 1 条 changelog，刷新基线。
@@ -285,7 +285,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       return decorateLink(record, true)
     },
 
-    /** 归档：只改一条 project 记录，不动任何子记录（ADR-36）。 */
+    /** 归档：只改一条 project 记录，不动任何子记录。 */
     async archiveProject(id, { expected_rev } = {}) {
       assertWritable()
       if (!domain.table('project').get(id)) throw new StoreError('PROJECT_NOT_FOUND', id)
@@ -305,7 +305,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     logs: () => [...domain.table('changelog').entries()].map(([, v]) => v),
 
     /**
-     * 九条对账（S0.7：状态三分 + 降级严格只读）。
+     * 九条对账（状态三分 + 降级严格只读）。
      *
      * 与"打开域时的完整性闸"分工：
      *   闸（openStore → guard.evaluate）只回答"能不能写"，判据是 D1/D2/D2b/D3/G_* /S_*；
@@ -322,7 +322,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       // 先看现在的磁盘：reconcile 是"状态检查"，不能拿打开时的快照下结论，
       // 更不能在快照说 ok 时把已经消失的元数据写回去。
       await refresh()
-      // 核心扫描是否真的跑过（S1-lite 缺陷 2）。
+      // 核心扫描是否真的跑过。
       // 扫描失败时 evaluate() 会推 CORE_CHECK_UNAVAILABLE，且 metaState 会是 unavailable；
       // 两者任一成立，就说明所有"依赖磁盘计数"的检查都没有执行过。
       const scanUnavailable = verdict.metaState === META_STATE.UNAVAILABLE
@@ -368,7 +368,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       add(5, '同一 session 的 supporting ≤ 2', byCount(badSup.length), 'violations=' + badSup.length)
 
       const d1 = verdict.criteria.filter(c => c.code === 'D1_SILENT_LOSS')
-      // 磁盘没数成 = 这条检查没执行，绝不允许报 pass（S1-lite 缺陷 2）。
+      // 磁盘没数成 = 这条检查没执行，绝不允许报 pass。
       // 状态 skipped 由 add() 自动补 scope=core / severity=degraded。
       if (scanUnavailable) {
         add(6, '磁盘文件数 vs 内存记录数（D1）', 'skipped', '未执行：磁盘扫描失败，无法对比磁盘与内存记录数', 'core')
@@ -397,7 +397,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       const skipped = checks.filter(c => c.status === 'skipped').length
       // 核心检查被跳过 = 判据跑不了 = 保守降级（界面必须当"坏了"处理）；
       // 外部检查被跳过只是"未验证"，不改变 degraded。
-      // S1-lite 缺陷 2：扫描不可用时也必须为 true，才能与 degradationReport().kind 一致。
+      // 扫描不可用时也必须为 true，才能与 degradationReport().kind 一致。
       // 第 1/2/4/5/7/9 条只依赖内存，扫描失败时仍照常判 pass —— 它们不是"没执行"。
       const coreUnavailable = scanUnavailable
         || checks.some(c => c.scope === 'core' && c.status === 'skipped')

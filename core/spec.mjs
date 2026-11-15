@@ -36,7 +36,7 @@ export const ProjectSchema = z.object({
   legacy_id: z.string().nullable().optional(),
   name: z.string().min(1).max(40),
   objective: z.string().min(1),
-  /** 必填（ADR-31）：空串或态度词在应用层先被拒，这里再兜一层。 */
+  /** 必填：空串或态度词在应用层先被拒，这里再兜一层。 */
   next_action: z.string().min(4).max(60),
   done_when: z.array(z.string()).optional(),
   kind: z.enum(['project', 'pipeline']),
@@ -120,7 +120,7 @@ export const MetaSchema = z.object({
   /** 对账基线；null = 从未登记过（新库）。只有完整性被证明时才允许写（铁律一）。 */
   expected_counts: z.record(z.string(), z.number()).nullable(),
   last_reconcile_at: z.string().nullable(),
-  /** S0.7：pass/fail/skipped 分列；三个新字段可选，旧记录仍能解析（不加版本戳）。 */
+  /** pass/fail/skipped 分列；三个新字段可选，旧记录仍能解析（不加版本戳）。 */
   last_reconcile_stats: z
     .object({
       ok: z.number(), orphans: z.number(), dangling: z.number(), degraded: z.boolean(),

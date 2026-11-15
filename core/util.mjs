@@ -1,5 +1,5 @@
 /**
- * core/util.mjs — ULID、时间、键构造。S0 实验代码，无第三方依赖。
+ * core/util.mjs — ULID、时间、键构造。无第三方依赖。
  */
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 

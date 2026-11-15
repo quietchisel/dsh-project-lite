@@ -21,7 +21,8 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "core"
+    "core",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "engines": {
@@ -43,7 +44,11 @@
     "zod": "*"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js"
+    "check": "node --check index.js && node --check client.js",
+    "pretest": "node -e \"require('node:fs').mkdirSync('.tmp',{recursive:true})\"",
+    "test": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json",
+    "test:core": "node test/s12-read-routes.mjs .tmp/base-s12 .tmp/s12.json && node test/s14-create-route.mjs .tmp/base-s14 .tmp/s14.json",
+    "test:all": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json && node test/s12-read-routes.mjs .tmp/base-s12 .tmp/s12.json && node test/s14-create-route.mjs .tmp/base-s14 .tmp/s14.json"
   },
   "repository": {
     "type": "git",
@@ -52,5 +57,19 @@
   "homepage": "https://github.com/quietchisel/dsh-project-lite#readme",
   "bugs": {
     "url": "https://github.com/quietchisel/dsh-project-lite/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-storage-domain": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
   }
 }

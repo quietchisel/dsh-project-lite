@@ -1,4 +1,4 @@
-# S1-lite 最小插件：一个 host 行（注册 /api/project/state）+ 一个 client 行（main slot 面板）。
+# 最小插件：一个 host 行（注册 /api/project/state）+ 一个 client 行（main slot 面板）。
 - insert:
     - id: project-lite
       name: dsh-project-lite

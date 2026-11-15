@@ -2,7 +2,9 @@
 
 DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能已经损坏时，宁可只读，也不静默覆盖。**
 
-> A minimal project panel plugin for DSH. Its point is not the CRUD — it is the integrity gate:
+> 兼容性：DSH `>= 0.2.2-rc.3` ｜ Node `>= 20` ｜ 已在 Windows 11 实测，macOS / Linux 未测
+>
+> A minimal project panel plugin for DSH. The point is not the CRUD — it is the integrity gate:
 > when project data on disk and in memory disagree, the plugin refuses to write and tells you why.
 
 ## 为什么需要它
@@ -49,6 +51,13 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 3. 完全退出 DSH 再启动（`index.js` 是 Host 半，必须重启才加载；`client.js` 改动刷新页面即可）。
 
 `<DSH_HOME>` 默认是 `~/.dsh`，可用环境变量 `DSH_HOME` 覆盖。
+
+## 数据落在哪 / 它碰什么
+
+1. 只读写 DSH 存储域下的 `project` 目录（默认 `<DSH_HOME>/storages`）。
+2. 会写一个本地证据文件 `<DSH_HOME>/project-lite/evidence.jsonl`（每次请求一行，用于排障；不含业务内容）。
+3. **不联网、不上传任何数据、不引入第三方运行时依赖**（`zod` 与 `@deepseek-ai/*` 由 DSH 宿主提供）。
+4. 损坏的文件原样保留作证据，**不自动修复、不自动重建**。
 
 ## HTTP API
 
@@ -102,18 +111,24 @@ core/
   read.mjs          只读服务层（同步读内存）
   util.mjs          ULID / 时间 / next_action 校验
   zip.mjs           备份打包
+test/               回归（见下节）
 ```
 
 ## 开发与测试
 
 ```bash
-node --check index.js
-node --check client.js
-node test/s14-create-route.mjs /tmp/base /tmp/out.json
-node test/s15-create-form.mjs /tmp/out.json
+npm run check      # 两个入口的语法门禁
+npm test           # 界面层 48 条（s13 渲染 28 + s15 新建表单 20）——零依赖，任何机器可跑
+npm run test:core  # core 层 52 条（s12 只读路由 32 + s14 新建路由 20）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 100 条
 ```
 
-测试全部在 Node 层跑（假 `webServer` + 真存储后端 + vm 加载真实 `client.js`），**不需要启动 DSH**。
+**为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
+
+- `npm test` 用 `vm` 加载真实 `client.js`，不需要任何依赖 → **GitHub Actions 里跑的就是这一档**；
+- `npm run test:core` 需要在装了 DSH 的机器上跑。
+
+测试全部不需要启动 DSH。
 
 ## 已知限制
 
@@ -121,8 +136,16 @@ node test/s15-create-form.mjs /tmp/out.json
 2. **归档/删除没有 UI 入口**，也没有对应路由。
 3. 对账第 3 条（`session_id` 是否在 DSH 会话注册表里存在）**恒为 `skipped`**，因为还没接注册表。
 4. 没有做真实 IO 故障注入（权限拒绝、磁盘满）的自动化测试。
-5. 版本 `0.x` 期间 API 可能变，不承诺兼容。
+5. 公共 CI 只覆盖界面层（原因见上节），core 层改动**不能只靠 CI**。
+6. 版本 `0.x` 期间 API 可能变，不承诺兼容。
+
+## 参与
+
+1. 报问题：[Issues](https://github.com/quietchisel/dsh-project-lite/issues/new/choose)（有模板；**数据损坏/安全问题请走私密渠道**，见 [SECURITY.md](SECURITY.md)）
+2. 提 PR：[CONTRIBUTING.md](CONTRIBUTING.md)
+3. 行为准则：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+4. 变更记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+[MIT](LICENSE) © 2026 quietchisel
