@@ -1,0 +1,56 @@
+{
+  "name": "dsh-project-lite",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 轻量项目面板：完整性闸 + 降级即只读，项目数据对不上就拒绝写入并说明原因",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "project",
+    "integrity",
+    "local-first"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "core"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.2-rc.3"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-storage-domain": "*",
+    "@deepseek-ai/dsh-storage": "*",
+    "zod": "*"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quietchisel/dsh-project-lite.git"
+  },
+  "homepage": "https://github.com/quietchisel/dsh-project-lite#readme",
+  "bugs": {
+    "url": "https://github.com/quietchisel/dsh-project-lite/issues"
+  }
+}
