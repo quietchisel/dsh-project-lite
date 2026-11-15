@@ -7,7 +7,7 @@
  *
  * 刻意不做：删除/归档按钮、任何第三个 slot、恢复功能。
  * 关于 slot：keyed 的 main 没有 sidebar.panellist 入口就永远打不开（2026-11-14 桌面实测 0 次请求），
- * 所以这两个 slot 是"框架必需"，不是范围扩大；官方任务看板同样是这两个。
+ * 所以这两个 slot 是"框架必需"，不是范围扩大；社区里同类面板插件也是这两个。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-project-lite',
@@ -333,7 +333,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         // 面板本体：keyed main，key 就是面板 id。
         ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'project-lite', order: 100 }, Panel))
-        // 入口：侧栏一行（id 必须与 main 的 key 同值）。做法与官方「任务看板」一致。
+        // 入口：侧栏一行（id 必须与 main 的 key 同值，否则面板打不开）。
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: 'project-lite',
