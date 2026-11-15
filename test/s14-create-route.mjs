@@ -53,15 +53,56 @@ function makeCtx() {
   return { ctx, routes, effects }
 }
 
-async function call(routes, path, { method = 'GET', query = '', json } = {}) {
+/**
+ * 假请求/响应：宿主给写路由传的是 Node 原生 req/res（IncomingMessage / ServerResponse），
+ * 不是 Fetch 的 Request/Response。测试必须照着真形状造，否则测的是假世界。
+ */
+function makeReq({ method = 'GET', url = '/', headers = {}, body }) {
+  const chunks = body === undefined ? [] : [Buffer.from(body, 'utf8')]
+  return {
+    method,
+    url,
+    headers,
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { for (const c of chunks) yield c },
+  }
+}
+
+function makeRes() {
+  const out = { statusCode: 200, headers: {}, body: '' }
+  return {
+    out,
+    // writeJson 是直接赋值 res.statusCode，所以这里必须是 getter/setter，否则状态码会被吞掉。
+    get statusCode() { return out.statusCode },
+    set statusCode(v) { out.statusCode = v },
+    setHeader(k, v) { out.headers[String(k).toLowerCase()] = v },
+    end(chunk) { if (chunk !== undefined && chunk !== null) out.body += String(chunk) },
+  }
+}
+
+async function call(routes, path, { method = 'GET', query = '', json, contentType = 'application/json' } = {}) {
   const def = routes.get(path)
   if (!def) throw new Error('route not registered: ' + path)
-  const init = { method }
-  if (json !== undefined) {
-    init.headers = { 'content-type': 'application/json' }
-    init.body = typeof json === 'string' ? json : JSON.stringify(json)
+  const url = 'http://127.0.0.1' + path + (query ? '?' + query : '')
+  const rawBody = json === undefined ? undefined : (typeof json === 'string' ? json : JSON.stringify(json))
+
+  if (typeof def.handler === 'function') {
+    const headers = {}
+    if (rawBody !== undefined && contentType) headers['content-type'] = contentType
+    const req = makeReq({ method, url, headers, body: rawBody })
+    const res = makeRes()
+    await def.handler(req, res)
+    let body = null
+    try { body = JSON.parse(res.out.body) } catch { /* 非 JSON */ }
+    return { status: res.out.statusCode, body, headers: res.out.headers }
   }
-  const req = new Request('http://127.0.0.1' + path + (query ? '?' + query : ''), init)
+
+  const init = { method }
+  if (rawBody !== undefined) {
+    init.headers = { 'content-type': contentType || 'application/json' }
+    init.body = rawBody
+  }
+  const req = new Request(url, init)
   const res = await def.resource(req)
   const text = await res.text()
   let body = null
@@ -94,6 +135,11 @@ async function runHealthy() {
   push('A-4', '非法 JSON → 400 BAD_JSON',
     badJson.status === 400 && badJson.body?.error?.code === 'BAD_JSON',
     'status=' + badJson.status + ' code=' + badJson.body?.error?.code)
+
+  const noCtype = await call(routes, CREATE_PATH, { method: 'POST', json: VALID, contentType: null })
+  push('A-4b', '缺 content-type: application/json → 415 JSON_REQUIRED（同时是 CSRF 闸）',
+    noCtype.status === 415 && noCtype.body?.error?.code === 'JSON_REQUIRED',
+    'status=' + noCtype.status + ' code=' + noCtype.body?.error?.code)
 
   const noName = await call(routes, CREATE_PATH, { method: 'POST', json: { objective: 'x', next_action: '跑一次回归' } })
   push('A-5', '缺 name → 400 INVALID_INPUT',

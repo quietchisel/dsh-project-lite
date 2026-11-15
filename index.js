@@ -58,6 +58,32 @@ function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: JSON_HEADERS })
 }
 
+/**
+ * 写路由必须用 Node 原生 req/res 形状（`handler`），不能用 Fetch 形状的 `resource`：
+ * 实测 2026-11-16 —— `resource` 注册的路由收到 POST 时被宿主直接挡成裸 405，根本进不到我们的代码。
+ * 只读路由继续用 `resource`（工作正常），写路由走 `handler`。
+ */
+const BODY_LIMIT = 64 * 1024
+
+function writeJson(res, status, obj) {
+  const body = JSON.stringify(obj)
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(body)
+}
+
+async function readJsonBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > BODY_LIMIT) throw new Error('body-too-large')
+    chunks.push(chunk)
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
 export function apply(ctx, config = {}) {
   // 域根：默认 = <home>/storages（dsh-base 的 root）；可用 env / config 指向夹具目录。
   const root = config.root || process.env.DSH_PROJECT_ROOT || join(dshHome(), 'storages')
@@ -191,35 +217,40 @@ export function apply(ctx, config = {}) {
   disposers.push(ctx.webServer.register({
     kind: 'exact',
     path: CREATE_PATH,
-    resource: async (request) => {
-      if ((request.method || 'GET') !== 'POST') {
-        return jsonResponse(errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + CREATE_PATH), 405)
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + CREATE_PATH))
+      }
+      // 只收 JSON：跨站表单发不出 application/json，这一条同时是 CSRF 闸（本路由不发 CORS 头）。
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) {
+        return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
       }
       let body
       try {
-        body = await request.json()
+        body = await readJsonBody(req)
       } catch (error) {
-        return jsonResponse(errorBody('BAD_JSON', 'request body must be valid JSON: ' + String(error && error.message ? error.message : error)), 400)
+        return writeJson(res, 400, errorBody('BAD_JSON', 'request body must be valid JSON: ' + String(error && error.message ? error.message : error)))
       }
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        return jsonResponse(errorBody('BAD_JSON', 'request body must be a JSON object'), 400)
+        return writeJson(res, 400, errorBody('BAD_JSON', 'request body must be a JSON object'))
       }
       const status = (body.status === undefined || body.status === null) ? 'active' : String(body.status)
       if (!CREATE_ALLOWED_STATUS.includes(status)) {
-        return jsonResponse(errorBody('INVALID_INPUT', 'status 只允许 ' + CREATE_ALLOWED_STATUS.join('/') + '（新建只能是 active）'), 400)
+        return writeJson(res, 400, errorBody('INVALID_INPUT', 'status 只允许 ' + CREATE_ALLOWED_STATUS.join('/') + '（新建只能是 active）'))
       }
       try {
         const s = await getStore()
-        // 写之前必须 refresh：store 长期存活，verdict 不能停在"打开那一刻"（0a 已踩过这个坑）。
+        // 写之前必须 refresh：store 长期存活，verdict 不能停在"打开那一刻"。
         await s.refresh()
         // 第一层闸：路由层自己判，不依赖 store 内部实现。降级时一个字节都不写。
         if (!s.writable) {
           const d = s.degradationReport()
           await evidence({ phase: 'create-refused', kind: d.kind })
-          return jsonResponse({
+          return writeJson(res, 409, {
             ...errorBody('READONLY_DEGRADED', '域处于只读降级，拒绝新建：' + (d.title || d.kind)),
             degradation: d,
-          }, 409)
+          })
         }
         const out = await s.createProject({
           name: body.name,
@@ -233,13 +264,13 @@ export function apply(ctx, config = {}) {
           status,
         })
         await evidence({ phase: 'create-served', project_id: out.project.id })
-        return jsonResponse({ ok: true, at: new Date().toISOString(), project: out.project, link: out.link })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out.project, link: out.link })
       } catch (error) {
         const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
         const message = String(error && error.message ? error.message : error)
         const httpStatus = code === 'READONLY_DEGRADED' ? 409 : (code === 'INTERNAL_ERROR' ? 500 : 400)
         await evidence({ phase: 'create-error', code, message })
-        return jsonResponse(errorBody(code, message), httpStatus)
+        return writeJson(res, httpStatus, errorBody(code, message))
       }
     },
   }))
