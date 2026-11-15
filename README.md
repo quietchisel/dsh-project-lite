@@ -119,8 +119,8 @@ test/               回归（见下节）
 ```bash
 npm run check      # 两个入口的语法门禁
 npm test           # 界面层 48 条（s13 渲染 28 + s15 新建表单 20）——零依赖，任何机器可跑
-npm run test:core  # core 层 52 条（s12 只读路由 32 + s14 新建路由 20）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 100 条
+npm run test:core  # core 层 53 条（s12 只读路由 32 + s14 新建路由 21）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 101 条
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
