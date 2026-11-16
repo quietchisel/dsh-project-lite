@@ -270,7 +270,7 @@ export function apply(ctx, config = {}) {
         // 1.8：指纹只取"决定结果"的字段；改一个字段就是另一个意图，同 requestId 必须被拒。
         const actKey = JSON.stringify({
           op: 'create', name: body.name, objective: body.objective, next_action: body.next_action,
-          done_when: body.done_when ?? null, tags: body.tags ?? null, session_id: body.session_id ?? null,
+          done_when: body.done_when ?? null, tags: body.tags ?? null, legacy_refs: body.legacy_refs ?? null, session_id: body.session_id ?? null,
           basis: body.basis ?? null, confidence: body.confidence ?? null, kind: body.kind ?? null, status,
         })
         const claimed = await s.claimRequest(body.requestId, actKey, () => s.createProject({
@@ -279,6 +279,7 @@ export function apply(ctx, config = {}) {
           next_action: body.next_action,
           done_when: body.done_when,
           tags: body.tags,
+          legacy_refs: body.legacy_refs,
           session_id: body.session_id,
           basis: body.basis,
           confidence: body.confidence,

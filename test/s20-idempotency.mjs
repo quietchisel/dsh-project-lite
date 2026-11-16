@@ -113,9 +113,26 @@ push('R11', r.status === 200 && r.body.replayed === true, 'link 同 id 同参数
 r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID, basis: '换个依据', requestId: 'req_beta_0001' } })
 push('R12', r.status === 409 && r.body.error.code === 'REQUEST_ID_CONFLICT', 'link 同 id 不同参数 → 409')
 
+// R16-R17：create 路由必须把 legacy_refs 透传到 store（0.4.0 修 tags 时漏了同类字段）
+const LR = [{
+  kind: 'project', original_id: 'legacy-001', original_path: null,
+  source_doc: '旧台账', source_path: 'D:\\old.md', imported_at: new Date().toISOString(),
+  imported_by: 's20', original_confidence: 'metadata_inferred', note: '透传验证',
+}]
+r = await call(routes, CREATE_PATH, { method: 'POST', json: {
+  name: '来源透传', objective: 'o', next_action: '验证 legacy_refs 不透传的死字段',
+  legacy_refs: LR, requestId: 'req_legacy_refs_1',
+} })
+const lrPid = r.body && r.body.project && r.body.project.id
+push('R16', r.status === 200 && !!lrPid && Array.isArray(r.body.project.legacy_refs) && r.body.project.legacy_refs.length === 1,
+  'create 带 legacy_refs → 返回记录里有（' + (r.body && r.body.project && JSON.stringify(r.body.project.legacy_refs)) + '）')
+const lrFile = JSON.parse(await readFile(join(ROOT, 'project', 'project', lrPid + '.json'), 'utf8'))
+push('R17', Array.isArray(lrFile.record.legacy_refs) && lrFile.record.legacy_refs.length === 1 && lrFile.record.legacy_refs[0].source_doc === '旧台账',
+  'legacy_refs 真的落盘（不是只在内存里）')
+
 const meta = JSON.parse(await readFile(join(ROOT, 'project', 'global.json'), 'utf8')).record
 const rr = meta.recent_requests || []
-push('R13', Array.isArray(rr) && rr.length === 2, 'recent_requests 落了 2 条（create + link）')
+push('R13', Array.isArray(rr) && rr.length === 3, 'recent_requests 落了 3 条（3 次 create + link；R16 那次带 legacy_refs）')
 push('R14', rr.every((x) => typeof x.fp === 'string' && x.fp.length === 32 && x.at), '每条都有 32 位指纹与时间戳')
 push('R15', rr.length <= 256, '上限 256 生效（当前 ' + rr.length + '）')
 
