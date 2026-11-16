@@ -164,6 +164,7 @@ push('T15', !!dn && String(dn.props.style.overflowY) === 'auto' && String(dn.pro
 push('T16', !!dn && String(dn.props.style.gridTemplateColumns).includes('auto-fit'), '宽屏自动多列（grid auto-fit），窄窗回落 1 列')
 const wrapNode = findAll(tree, (n) => n.props && n.props['data-project-lite'] === 'panel')[0]
 push('T17', !!wrapNode && String(wrapNode.props.style.maxWidth) === 'none' && String(wrapNode.props.style.width) === '100%', '外层容器随窗口流式（maxWidth=none / width=100%）')
+push('T19', !!wrapNode && String(wrapNode.props.style.overflowY) === 'auto' && String(wrapNode.props.style.maxHeight).length > 0, '面板整体可滚（窗口缩小时能看下面）')
 
 // --- 关联会话选择器也要能滚（50 条候选会撑爆面板）---
 byAttr(tree, 'data-action', 'open-link')[0].props.onClick()

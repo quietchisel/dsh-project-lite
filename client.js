@@ -36,7 +36,12 @@ window.__ModuleLoader__.load({
     const C = {
       // 2026-11-16 使用者反馈：全屏时右边一片空白（原来写死 maxWidth 960px，只在小窗合适）。
       // 改成随窗口流式：宽度撑满、按内容自适应，不再固定上限。
-      wrap: { padding: '16px 20px', width: '100%', maxWidth: 'none', boxSizing: 'border-box', fontFamily: 'inherit' },
+      // 窗口缩小时整块面板必须能滚（之前只给详情块和选择器加了滚动，外层没有）。
+      // maxHeight 用 100vh：不依赖宿主容器是否给了确定高度，内容超高就出滚动条。
+      wrap: {
+        padding: '16px 20px', width: '100%', maxWidth: 'none', boxSizing: 'border-box',
+        fontFamily: 'inherit', maxHeight: '100vh', overflowY: 'auto',
+      },
       h2: { fontSize: '15px', fontWeight: 600, margin: '0 0 10px' },
       red: { border: '1px solid #d93025', background: '#fdecea', color: '#7a1710', borderRadius: '8px', padding: '10px 12px', marginBottom: '12px' },
       redTitle: { fontWeight: 600, fontSize: '13px', marginBottom: '4px' },
