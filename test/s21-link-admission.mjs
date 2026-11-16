@@ -90,7 +90,8 @@ await writeWs({ dropWs: true })
 r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID, basis: 'S21' } })
 push('A3', r.status === 400 && r.body.error.code === 'WORKSPACE_GONE', '工作区被移出列表 → WORKSPACE_GONE（' + (r.body.error && r.body.error.message) + '）')
 
-// 4 工作区目录不存在
+// 4 工作区目录不存在（A4 修缓存：verify() 必须 snapshot({force:true})，
+//    否则 mtime 同毫秒连续改 workspace.json 会读到旧路径，本条偶发失败）
 await writeWs({ path: join(BASE, 'this-dir-does-not-exist') })
 const snapBefore = await snapshotTree(join(ROOT, 'project'))
 r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID, basis: 'S21' } })

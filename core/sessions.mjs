@@ -178,7 +178,9 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
    * 宁可现在拒，也不要留一条假引用。
    */
   async function verify(sessionId) {
-    const s = await snapshot()
+    // 关联是写操作，必须拿最新注册表。mtime 是毫秒粒度，同一毫秒内连续改文件会
+    // 让缓存误判"没变"（s21 A4 实测偶发），所以这里强制重读，不吃缓存。
+    const s = await snapshot({ force: true })
     if (!s.ok) return { ok: false, code: 'REGISTRY_UNAVAILABLE', reason: s.reason || '读不到 DSH 会话注册表' }
     const id = String(sessionId || '')
     const row = s.byId.get(id)
