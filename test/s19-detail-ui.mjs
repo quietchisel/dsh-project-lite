@@ -75,6 +75,7 @@ function fakeFetch(url, init) {
   const u = String(url)
   if (u.includes('api/project/state')) payload = STATE
   else if (u.includes('api/project/overview')) payload = OVERVIEW
+  else if (u.includes('api/project/sessions')) payload = { ok: true, total: 0, matched: 0, limit: 50, sessions: [] }
   else if (u.includes('api/project/get')) {
     if (detailMode === 'missing') payload = { ok: true, found: false, project: null, sessions: [], workspaces: [], deliverables: [], logs: [], counts: { sessions: 0, workspaces: 0, deliverables: 0, logs: 0, unconfirmed: 0 }, unconfirmed: [], degradation: { degraded: false } }
     else if (detailMode === 'fail') payload = { ok: false, error: { code: 'INTERNAL_ERROR', message: '炸了' } }
@@ -163,6 +164,13 @@ push('T15', !!dn && String(dn.props.style.overflowY) === 'auto' && String(dn.pro
 push('T16', !!dn && String(dn.props.style.gridTemplateColumns).includes('auto-fit'), '宽屏自动多列（grid auto-fit），窄窗回落 1 列')
 const wrapNode = findAll(tree, (n) => n.props && n.props['data-project-lite'] === 'panel')[0]
 push('T17', !!wrapNode && String(wrapNode.props.style.maxWidth) === 'none' && String(wrapNode.props.style.width) === '100%', '外层容器随窗口流式（maxWidth=none / width=100%）')
+
+// --- 关联会话选择器也要能滚（50 条候选会撑爆面板）---
+byAttr(tree, 'data-action', 'open-link')[0].props.onClick()
+await flush()
+tree = render()
+const pick = findAll(tree, (n) => n.props && n.props['data-link-form'] === '1')[0]
+push('T18', !!pick && String(pick.props.style.overflowY) === 'auto' && String(pick.props.style.maxHeight).length > 0, '关联会话选择器自身可滚动（overflowY=auto + maxHeight）')
 
 
 const pass = steps.filter((s) => s.ok).length

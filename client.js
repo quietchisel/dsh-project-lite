@@ -73,6 +73,11 @@ window.__ModuleLoader__.load({
         maxHeight: '62vh', overflowY: 'auto', boxSizing: 'border-box',
       },
       detailFull: { gridColumn: '1 / -1' },
+      // 关联会话选择器：候选最多 50 条，必须自身滚动，否则下面全被裁掉（2026-11-16 全屏反馈）。
+      picker: {
+        border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px', marginTop: '12px',
+        maxHeight: '62vh', overflowY: 'auto', boxSizing: 'border-box',
+      },
       overlayMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.38)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 },
       overlayBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '10px', padding: '14px 16px', minWidth: '340px', maxWidth: '520px', maxHeight: '70vh', overflow: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.28)' },
     }
@@ -454,7 +459,7 @@ window.__ModuleLoader__.load({
        * 1.4 关联会话选择器。四态与新建表单一致：未开 / 读取中 / 有候选 / 出错。
        * 候选行的标题来自会话缓存，缓存里没有就显示 session id —— 不编造标题。
        */
-      const linkPicker = linkFor ? h('div', { style: C.form, 'data-link-form': '1', 'data-link-project': linkFor.id },
+      const linkPicker = linkFor ? h('div', { style: C.picker, 'data-link-form': '1', 'data-link-project': linkFor.id },
         h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
         linkErr ? h('div', { style: C.err, role: 'alert', 'data-link-error': '1' }, '关联失败：' + linkErr) : null,
         linkDone ? h('div', { style: C.done, 'data-link-done': '1' }, linkDone) : null,
