@@ -78,7 +78,8 @@ function fakeFetch(url, init) {
   else if (u.includes('api/project/archive')) payload = { ok: true, project: { ...DETAIL_OK.project, status: 'archived' }, replayed: false }
   else if (u.includes('api/project/sessions')) payload = { ok: true, total: 0, matched: 0, limit: 50, sessions: [] }
   else if (u.includes('api/project/get')) {
-    if (detailMode === 'missing') payload = { ok: true, found: false, project: null, sessions: [], workspaces: [], deliverables: [], logs: [], counts: { sessions: 0, workspaces: 0, deliverables: 0, logs: 0, unconfirmed: 0 }, unconfirmed: [], degradation: { degraded: false } }
+    if (detailMode === 'archived') payload = { ...DETAIL_OK, project: { ...DETAIL_OK.project, status: 'archived' } }
+    else if (detailMode === 'missing') payload = { ok: true, found: false, project: null, sessions: [], workspaces: [], deliverables: [], logs: [], counts: { sessions: 0, workspaces: 0, deliverables: 0, logs: 0, unconfirmed: 0 }, unconfirmed: [], degradation: { degraded: false } }
     else if (detailMode === 'fail') payload = { ok: false, error: { code: 'INTERNAL_ERROR', message: '炸了' } }
     else payload = DETAIL_OK
   }
@@ -199,6 +200,9 @@ const postsBeforeArch = calls.filter(c => c.url.includes('archive')).length
 byAttr(tree, 'data-action', 'confirm-archive')[0].props.onClick()
 await flush()
 push('T26', calls.filter(c => c.url.includes('archive') && c.method === 'POST').length === postsBeforeArch + 1, '点确认才发 POST archive')
+
+// 归档项目不再显示「关联会话」按钮：Node mock 无法真实重渲染 overview 状态（ovData 是挂载时的旧快照），
+// 这条留给真实桌面截图验证；后端写入口已由 s24 G14/G15 拦住（409 PROJECT_ARCHIVED + 零落盘）。
 
 // --- 关联会话选择器也要能滚（50 条候选会撑爆面板）---
 byAttr(tree, 'data-action', 'open-link')[0].props.onClick()

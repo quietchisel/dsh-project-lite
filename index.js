@@ -381,6 +381,12 @@ export function apply(ctx, config = {}) {
         // 负例闸：注册表里没有这个会话就拒绝，不许手工拼 id 造孤儿 link。
         // 注册表本身读不到时（workspace.json 缺失）不拦，但把 registryChecked=false 记进证据与响应，
         // 对账第 3 条随后会把真实孤儿标出来（external fail，不降级）。
+        // 归档项目不能再挂新会话：归档是"收起"，不是"冻结"，但写入口必须关掉。
+        const target = s.project(project_id)
+        if (target && target.status === 'archived') {
+          await evidence({ phase: 'link-refused', reason: 'PROJECT_ARCHIVED' })
+          return writeJson(res, 409, errorBody('PROJECT_ARCHIVED', '项目已归档，不能再关联会话（先恢复项目）'))
+        }
         // 1.10 fail-closed 三校验：会话在不在、工作区还在不在列表里、工作区目录还在不在。
         // 任一不过 → 400 + 人话原因，零落盘。注册表本身读不到时放行但记 registryChecked=false。
         let registryChecked = false

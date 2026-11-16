@@ -445,14 +445,16 @@ window.__ModuleLoader__.load({
               ),
               h('div', { style: C.projMeta }, '目标：' + (p.objective || '—')),
               h('div', { style: C.projMeta }, '下一步：' + (p.next_action || '—')),
-              h('button', {
-                type: 'button',
-                style: readOnly ? Object.assign({}, C.pickBtn, C.submitOff) : C.pickBtn,
-                disabled: readOnly,
-                'data-action': 'open-link',
-                'data-for': p.id,
-                onClick: () => openLink(p),
-              }, '关联会话'),
+              p.status !== 'archived'
+                ? h('button', {
+                    type: 'button',
+                    style: readOnly ? Object.assign({}, C.pickBtn, C.submitOff) : C.pickBtn,
+                    disabled: readOnly,
+                    'data-action': 'open-link',
+                    'data-for': p.id,
+                    onClick: () => openLink(p),
+                  }, '关联会话')
+                : null,
             ))
           }
         }

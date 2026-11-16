@@ -13,7 +13,7 @@
  */
 import { rm, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { apply, CREATE_PATH, ARCHIVE_PATH, READ_PATHS } from '../index.js'
+import { apply, CREATE_PATH, ARCHIVE_PATH, READ_PATHS, LINK_PATH } from '../index.js'
 import { snapshotTree, diffSnapshot } from './_lib.mjs'
 
 const BASE = process.argv[2]
@@ -115,6 +115,14 @@ r = await call(routes2, ARCHIVE_PATH, { method: 'POST', json: { id: pid, request
 push('G12', r.status === 409 && r.body.error.code === 'READONLY_DEGRADED', '降级库归档 → 409 READONLY_DEGRADED')
 const snapB2 = await snapshotTree(join(BAD, 'project'))
 push('G13', diffSnapshot(snapB, snapB2).length === 0, '降级被拒后零落盘')
+
+// G14-G15：归档项目不能再挂会话
+const readLinks = async () => { try { return (await readdir(join(GOOD, 'project', 'project_session'))).filter(f => f.endsWith('.json')).length } catch { return 0 } }
+const sCountBefore = await readLinks()
+r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: 'session-44444444-4444-4444-4444-444444444444', basis: 'S24', requestId: 'req_arch_link' } })
+push('G14', r.status === 409 && r.body.error.code === 'PROJECT_ARCHIVED', '归档项目关联会话 → 409 PROJECT_ARCHIVED')
+const sCountAfter = await readLinks()
+push('G15', sCountBefore === sCountAfter, '被拒后 project_session 零落盘')
 
 const pass = steps.filter(s => s.ok).length
 const summary = { at: new Date().toISOString(), suite: 's24-archive', total: steps.length, pass, fail: steps.length - pass, verdict: pass === steps.length ? 'PASS' : 'FAIL', steps }
