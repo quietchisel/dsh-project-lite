@@ -26,15 +26,17 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 ## 界面
 
-侧栏「项目」面板，三块：
+侧栏「项目」面板，从上到下：
 
-1. **降级红条**：标题 + 原因 + 「已禁止：create_project、link_session、archive_project」；健康时显示「项目数据完整，可写。」
+1. **降级红条**：标题 + 原因 + 已禁止的写操作；健康时显示「项目数据完整，可写。」
 2. **检查状态**：通过 / 失败 / 未检查三个数字 + 未检查项的名称与原因（区分「核心 · 降级」与「外部 · 未验证」）。
-3. **项目列表 + 新建表单**：按 `active → paused → done → archived` 四组展示；空库有空态；降级时列表只读、表单禁用并写明原因。
+3. **项目列表 + 新建表单**：按 `active → paused → done → archived` 四组展示；空库有空态；降级时列表只读、表单禁用并写明原因。`inferred` 项目名后带「未确认」徽标，点开看依据浮层（basis + legacy_refs）。
+4. **项目详情**：点项目名展开六分区（项目 / 关联会话 / 工作区 / 交付物 / 变更记录 / 依据），再点一次收起。非归档项目显示「归档」按钮，归档项目显示「恢复」按钮，均有二次确认。
+5. **关联会话选择器**：项目行点「关联会话」展开，搜索并挂载会话；「收起」按钮固定在标题行，滚动候选列表时不会滚走。归档项目不显示此按钮（后端也拒绝，409）。
 
 ## 安装
 
-本插件是 DSH profile 的本地插件，通过 `link:` 挂载。**两处都要改，只改一处不生效**（实测）：
+本插件是 DSH profile 的本地插件，通过 `link:` 挂载。**三处都要改，只改一处不生效**（实测；漏掉 lockfile 会在下次依赖安装时被静默回退）：
 
 1. 编辑 `<DSH_HOME>/profiles/<profile>/package.json`，在 `dependencies` 里加：
 
@@ -48,7 +50,8 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
    mklink /J "<DSH_HOME>\profiles\<profile>\node_modules\dsh-project-lite" "<本仓库的绝对路径>"
    ```
 
-3. 完全退出 DSH 再启动（`index.js` 是 Host 半，必须重启才加载；`client.js` 改动刷新页面即可）。
+3. 若 profile 有 `pnpm-lock.yaml`，同步该包的 `specifier` / `version` 两行为同一路径（本机曾因 lockfile 钉住旧路径，依赖安装时把 Junction 掀回旧目录）。
+4. 完全退出 DSH 再启动（`index.js` 是 Host 半，必须重启才加载；`client.js` 改动刷新页面即可）。
 
 `<DSH_HOME>` 默认是 `~/.dsh`，可用环境变量 `DSH_HOME` 覆盖。
 
@@ -77,6 +80,8 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 | POST | `/api/project/create` | JSON body | 建项目。写入口之一 |
 | GET | `/api/project/sessions` | `q`，`limit`（≤200，默认 50） | 会话候选：归属读 `workspace.json`，标题读会话缓存（读不到给 `null`，不编造） |
 | POST | `/api/project/link` | JSON body | 把会话挂到项目。**幂等**：同一条重复提交零副作用 |
+| POST | `/api/project/archive` | JSON body | 归档（active→archived）。需 `expected_rev` 防覆盖；重复归档 `already_archived:true` 零副作用 |
+| POST | `/api/project/restore` | JSON body | 恢复归档（archived→active）。需 `expected_rev`；非归档 `409 NOT_ARCHIVED` |
 
 `POST /api/project/create` 的 body：
 
@@ -88,11 +93,11 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 **所有写入在落盘前都会用读路径同一份 schema 校验**（`spec.tables[*].valueSchema`）：不合法直接 `RECORD_INVALID`，一个字节都不写。这一层不能省——域层只在开库时校验磁盘记录，`put` 不校验，漏了这一层就会出现「写得进去、下次开库被隔离、整库降级只读」（0.2.1 修的就是这个）。
 
-两个写入口都接受可选 `requestId`（4-64 位字母数字 `_-`）：同 id 同参数 → 回上次结果且 `replayed:true`；同 id 不同参数 → `409 REQUEST_ID_CONFLICT`。
+四个写入口（create / link / archive / restore）都接受可选 `requestId`（4-64 位字母数字 `_-`）：同 id 同参数 → 回上次结果且 `replayed:true`；同 id 不同参数 → `409 REQUEST_ID_CONFLICT`。
 
 `POST /api/project/link` 的 body：`{ "project_id": "prj_…", "session_id": "session-…", "role": "primary|supporting", "basis": "必填，依据" }`。会话必须先在 DSH 注册表里存在，否则 `400 SESSION_NOT_FOUND`。
 
-错误码：`METHOD_NOT_ALLOWED`(405) / `JSON_REQUIRED`(415) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `RECORD_INVALID`(400，带 `issues`) / `REQUEST_ID_CONFLICT`(409) / `SESSION_NOT_FOUND`(400) / `BASIS_REQUIRED`(400) / `REGISTRY_UNAVAILABLE`(200 但 `ok:false`) / `READONLY_DEGRADED`(409) / `INTERNAL_ERROR`(500)。
+错误码：`METHOD_NOT_ALLOWED`(405) / `JSON_REQUIRED`(415) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `RECORD_INVALID`(400，带 `issues`) / `REQUEST_ID_CONFLICT`(409) / `SESSION_NOT_FOUND`(400) / `WORKSPACE_GONE`(400) / `WORKSPACE_PATH_MISSING`(400) / `BASIS_REQUIRED`(400) / `REGISTRY_UNAVAILABLE`(200 但 `ok:false`) / `READONLY_DEGRADED`(409) / `REV_CONFLICT`(409) / `PROJECT_ARCHIVED`(409) / `NOT_ARCHIVED`(409) / `INTERNAL_ERROR`(500)。
 
 `next_action` 会被拒的情形：空、短于 4 字、长于 60 字、命中态度词黑名单（`继续推进` / `推进` / `待定` / `深入研究` / `tbd` / `todo` 等）。**「下一步」必须是能直接执行的动作，不是态度。**
 
@@ -111,7 +116,7 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 ## 目录结构
 
 ```
-index.js            Host 半：6 条 exact 路由 + storageDomain 接入
+index.js            Host 半：10 条 exact 路由 + storageDomain 接入
 client.js           Client 半：面板（main slot + sidebar.panellist 入口）
 cordis.patch.yml    DSH 插件补丁声明
 core/
@@ -128,9 +133,9 @@ test/               回归（见下节）
 
 ```bash
 npm run check      # 两个入口的语法门禁
-npm test           # 界面层 48 条（s13 渲染 28 + s15 新建表单 20）——零依赖，任何机器可跑
-npm run test:core  # core 层 130 条（s12 32 + s14 21 + s16 19 + s17 29 + s18 14 + s20 15）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 197 条
+npm test           # 界面层 79 条（s13 28 + s15 22 + s19 29）——零依赖，任何机器可跑
+npm run test:core  # core 层 183 条（11 套）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 262 条（14 套）
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
@@ -142,9 +147,9 @@ npm run test:all   # 全部 197 条
 
 ## 已知限制
 
-1. **关联会话的 UI 还没做**（后端 `linkSession` 与 `links-of-session` 路由都在，但界面上没有入口）。
-2. **归档/删除没有 UI 入口**，也没有对应路由。
-3. 对账第 3 条（`session_id` 是否在 DSH 会话注册表里存在）**恒为 `skipped`**，因为还没接注册表。
+1. **删除功能未做**（不可逆，且不经过项目域）；归档 / 恢复已做，见上方 API 表。
+2. 工作区与交付物两区**只读**，不做自动发现、不做注册写入口。
+3. 对账第 3 条已接 DSH 会话注册表：健康域 `9/0/0`；夹具域（无 `workspace.json`）`8/0/1`（那 1 项按设计 skipped）——两者都属正常。
 4. 没有做真实 IO 故障注入（权限拒绝、磁盘满）的自动化测试。
 5. 公共 CI 只覆盖界面层（原因见上节），core 层改动**不能只靠 CI**。
 6. 版本 `0.x` 期间 API 可能变，不承诺兼容。
