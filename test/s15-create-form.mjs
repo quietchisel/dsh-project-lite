@@ -157,6 +157,9 @@ push('E6', bodyOk, 'POST body 三个必填字段都带上了')
 let dwOk = false
 try { const b = JSON.parse(post.body); dwOk = Array.isArray(b.done_when) && b.done_when.length === 1 && b.done_when[0] === '一次回归全绿' } catch { dwOk = false }
 push('E6b', dwOk, 'done_when 以 string[] 提交（不是裸字符串）')
+let rid = null
+try { rid = JSON.parse(post.body).requestId } catch { rid = null }
+push('E6c', typeof rid === 'string' && /^req_[a-z0-9_]+$/i.test(rid), '新建提交带 requestId（' + rid + '）')
 push('E7', calls.filter((c) => c.url.includes('overview')).length === ovCallsBefore + 1, '成功后立刻重拉了一次 overview')
 push('E8', flat.text.some((t) => t.includes('已建项目：新项目甲')), '成功提示可见')
 const nameInput = byAttr(tree, 'data-field', 'name')[0]

@@ -26,6 +26,13 @@ window.__ModuleLoader__.load({
     const API_SESSIONS = 'api/project/sessions'
     const API_LINK = 'api/project/link'
 
+    /**
+     * 1.8：一次"用户意图"一个 requestId。
+     * 新建表单在**失败重试**时复用同一个 id（所以连点只算一次），成功后清空；
+     * 关联每次点击都是新意图（幂等已由确定性键保证），每次新生成。
+     */
+    const newRequestId = () => 'req_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10)
+
     const C = {
       // 2026-11-16 使用者反馈：全屏时右边一片空白（原来写死 maxWidth 960px，只在小窗合适）。
       // 改成随窗口流式：宽度撑满、按内容自适应，不再固定上限。
@@ -157,6 +164,8 @@ window.__ModuleLoader__.load({
       const [submitting, setSubmitting] = useState(false)
       const [formError, setFormError] = useState(null)
       const [formDone, setFormDone] = useState(null)
+      // 提交失败重试要复用同一个 requestId，否则"重试"在账本里会变成两次新意图。
+      const [createReqId, setCreateReqId] = useState(null)
 
       // 1.4 关联会话：同时只服务一个项目；候选来自后端 /api/project/sessions。
       const [linkFor, setLinkFor] = useState(null)
@@ -179,11 +188,14 @@ window.__ModuleLoader__.load({
         if (submitting) return
         if (!(ovData && ovData.writable !== false && ovData.degraded !== true)) return
         setSubmitting(true); setFormError(null); setFormDone(null)
+        const rid = createReqId || newRequestId()
+        if (!createReqId) setCreateReqId(rid)
         try {
           const res = await fetch(API_CREATE, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
+              requestId: rid,
               name: form.name,
               objective: form.objective,
               next_action: form.next_action,
@@ -194,8 +206,9 @@ window.__ModuleLoader__.load({
           let json = null
           try { json = await res.json() } catch (e) { json = null }
           if (json && json.ok && json.project) {
-            setFormDone('已建项目：' + (json.project.name || json.project.id))
+            setFormDone('已建项目：' + (json.project.name || json.project.id) + (json.replayed ? '（重放：这条请求之前已执行过，未重复建）' : ''))
             setForm({ name: '', objective: '', next_action: '', done_when: '' })
+            setCreateReqId(null)
             await loadOverview()
           } else {
             const er = json && json.error
@@ -206,7 +219,7 @@ window.__ModuleLoader__.load({
         } finally {
           setSubmitting(false)
         }
-      }, [form, submitting, ovData, loadOverview])
+      }, [form, submitting, ovData, loadOverview, createReqId])
 
       /**
        * 1.4：读会话候选。失败只写 linkErr，绝不触碰主面板 error（否则整块白屏）。
@@ -267,7 +280,7 @@ window.__ModuleLoader__.load({
           const res = await fetch(API_LINK, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ project_id: linkFor.id, session_id: sessionId, basis: '界面手动关联' }),
+            body: JSON.stringify({ requestId: newRequestId(), project_id: linkFor.id, session_id: sessionId, basis: '界面手动关联' }),
           })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
@@ -618,7 +631,7 @@ window.__ModuleLoader__.load({
           const res = await fetch(API_LINK, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ project_id: p.id, session_id: req.sessionId, basis: '会话右键关联' }),
+            body: JSON.stringify({ requestId: newRequestId(), project_id: p.id, session_id: req.sessionId, basis: '会话右键关联' }),
           })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
