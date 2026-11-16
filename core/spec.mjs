@@ -110,6 +110,11 @@ export const ChangelogSchema = z.object({
   summary: z.string().min(1),
   before_rev: z.number().int().nullable(),
   after_rev: z.number().int().nullable(),
+  /**
+   * 1.9 声明 vs 证据：这条变更是"人点的"还是"程序跑的"。
+   * 可选——旧记录没有这个字段也能解析（不加版本戳）。缺省语义按 manual 处理。
+   */
+  source: z.enum(['manual', 'run']).optional(),
 })
 
 /** 全局单例。注意 defineDomain 拒绝"能接受 null 的 global schema"。 */

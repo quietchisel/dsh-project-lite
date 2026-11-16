@@ -266,11 +266,13 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     return counts
   }
 
-  async function writeLog(op, targetTable, targetKey, summary, beforeRev, afterRev) {
+  async function writeLog(op, targetTable, targetKey, summary, beforeRev, afterRev, source = 'manual') {
     const id = newLogId()
     const rec = {
       id, at: nowIso(), actor, op, target_table: targetTable, target_key: targetKey,
       summary, before_rev: beforeRev ?? null, after_rev: afterRev ?? null,
+      // 1.9：现在所有写入口都是人点的（manual）；runner 接进来后由它传 'run'。
+      source,
     }
     assertRecord('changelog', rec)
     await domain.table('changelog').put(id, rec)

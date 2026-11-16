@@ -95,6 +95,7 @@ push('C13', Array.isArray(miss.sessions) && Array.isArray(miss.workspaces) && Ar
 let serial = null
 try { serial = JSON.parse(JSON.stringify(d)) } catch (e) { serial = null }
 push('C14', serial !== null && serial.project.id === pid && typeof serial.project.done_when[0] === 'string', '返回可 JSON 序列化且字段完整')
+push('C15', d.logs.every((l) => l.source === 'manual'), '1.9：每条变更都标了来源（全部 manual，当前没有 runner）')
 
 await s.close()
 

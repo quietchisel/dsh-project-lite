@@ -559,7 +559,9 @@ window.__ModuleLoader__.load({
         const deliverables = (dd.deliverables || []).map((x) => h('div', { key: 'dd' + x.id, style: C.item },
           badge(x.confidence), (x.title || x.id) + ' · ' + (x.kind || '?') + ' · ' + (x.state || '?')))
         const logs = (dd.logs || []).slice(0, 10).map((l) => h('div', { key: 'dl' + l.id, style: C.item },
-          String(l.at || '').slice(0, 19).replace('T', ' ') + ' · ' + l.op + ' · ' + (l.summary || '')))
+          String(l.at || '').slice(0, 19).replace('T', ' ') + ' · ' + l.op
+          + ' · ' + (l.source === 'run' ? '程序' : '人工')
+          + ' · ' + (l.summary || '')))
         const unconf = (dd.unconfirmed || []).map((u) => h('div', { key: 'du' + u.kind + u.id, style: C.item },
           badge('inferred'), u.kind + ' · ' + (u.title || u.session_id || u.workspace_id || u.id) + ' · ' + (u.basis || '—')))
         const sec = (key, title, count, body, emptyText) => h('div', { 'data-section': key },
