@@ -88,9 +88,11 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 **所有写入在落盘前都会用读路径同一份 schema 校验**（`spec.tables[*].valueSchema`）：不合法直接 `RECORD_INVALID`，一个字节都不写。这一层不能省——域层只在开库时校验磁盘记录，`put` 不校验，漏了这一层就会出现「写得进去、下次开库被隔离、整库降级只读」（0.2.1 修的就是这个）。
 
+两个写入口都接受可选 `requestId`（4-64 位字母数字 `_-`）：同 id 同参数 → 回上次结果且 `replayed:true`；同 id 不同参数 → `409 REQUEST_ID_CONFLICT`。
+
 `POST /api/project/link` 的 body：`{ "project_id": "prj_…", "session_id": "session-…", "role": "primary|supporting", "basis": "必填，依据" }`。会话必须先在 DSH 注册表里存在，否则 `400 SESSION_NOT_FOUND`。
 
-错误码：`METHOD_NOT_ALLOWED`(405) / `JSON_REQUIRED`(415) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `RECORD_INVALID`(400，带 `issues`) / `SESSION_NOT_FOUND`(400) / `BASIS_REQUIRED`(400) / `REGISTRY_UNAVAILABLE`(200 但 `ok:false`) / `READONLY_DEGRADED`(409) / `INTERNAL_ERROR`(500)。
+错误码：`METHOD_NOT_ALLOWED`(405) / `JSON_REQUIRED`(415) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `RECORD_INVALID`(400，带 `issues`) / `REQUEST_ID_CONFLICT`(409) / `SESSION_NOT_FOUND`(400) / `BASIS_REQUIRED`(400) / `REGISTRY_UNAVAILABLE`(200 但 `ok:false`) / `READONLY_DEGRADED`(409) / `INTERNAL_ERROR`(500)。
 
 `next_action` 会被拒的情形：空、短于 4 字、长于 60 字、命中态度词黑名单（`继续推进` / `推进` / `待定` / `深入研究` / `tbd` / `todo` 等）。**「下一步」必须是能直接执行的动作，不是态度。**
 
@@ -127,8 +129,8 @@ test/               回归（见下节）
 ```bash
 npm run check      # 两个入口的语法门禁
 npm test           # 界面层 48 条（s13 渲染 28 + s15 新建表单 20）——零依赖，任何机器可跑
-npm run test:core  # core 层 115 条（s12 32 + s14 21 + s16 19 + s17 29 + s18 14）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 178 条
+npm run test:core  # core 层 130 条（s12 32 + s14 21 + s16 19 + s17 29 + s18 14 + s20 15）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 197 条
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：

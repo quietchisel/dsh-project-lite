@@ -5,6 +5,7 @@
  * 所有写入口先过完整性闸（guard.writable），降级时抛 READONLY_DEGRADED —— 不是只把按钮藏起来。
  */
 import { mkdir } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { buildSpec, TABLES, VERSION, MetaSchema } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
 import { newProjectId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
@@ -139,6 +140,40 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   }
 
   /**
+   * 1.8 幂等指纹：同 requestId + 同动作 → 回上次结果（不重复执行）；同 id 不同动作 → 拒。
+   *
+   * 为什么需要：link 靠确定性键天然幂等，但 create 每点一次就是一个新项目。
+   * 界面重复提交、网络重试、agent 重放都会造成两条"看起来一样"的记录。
+   *
+   * 指纹用动作参数的 canonical JSON 算 sha256：参数改了就说明是另一个意图，必须拒，
+   * 不许拿同一个 requestId 覆盖上一次的结果。
+   */
+  async function claimRequest(requestId, actionKey, exec) {
+    if (requestId === undefined || requestId === null || requestId === '') {
+      return { replayed: false, value: await exec() }
+    }
+    const id = String(requestId)
+    if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) {
+      throw new StoreError('INVALID_INPUT', 'requestId 只允许 4-64 位字母数字与 _-')
+    }
+    const fp = createHash('sha256').update(String(actionKey)).digest('hex').slice(0, 32)
+    const cur = meta()
+    const list = Array.isArray(cur.recent_requests) ? cur.recent_requests : []
+    const hit = list.find((r) => r && r.id === id)
+    if (hit) {
+      if (hit.fp !== fp) {
+        throw new StoreError('REQUEST_ID_CONFLICT', 'requestId ' + id + ' 已用于另一个动作（指纹不同），拒绝复用', { request_id: id })
+      }
+      return { replayed: true, value: hit.value ?? null }
+    }
+    const value = await exec()
+    const plain = JSON.parse(JSON.stringify(value ?? null))
+    const next = [...list.filter((r) => r && r.id !== id), { id, fp, at: nowIso(), value: plain }].slice(-256)
+    await patchMeta((m) => ({ ...m, recent_requests: next }))
+    return { replayed: false, value }
+  }
+
+  /**
    * 重新数磁盘 + 重算判据（必须的）。
    *
    * 为什么：verdict 是"打开那一刻"的快照。插件里的 store 是长期存活的，
@@ -243,6 +278,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
 
   Object.assign(store, {
     meta,
+    claimRequest,
     /** 建项目：被引用者先写（project → link → changelog），符合顺序协议 §8.3。 */
     async createProject({ name, objective, next_action, done_when, tags, kind = 'project', status = 'active', session_id, basis, confidence = 'confirmed', legacy_refs }) {
       assertWritable()

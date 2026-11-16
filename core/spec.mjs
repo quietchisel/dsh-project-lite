@@ -133,6 +133,16 @@ export const MetaSchema = z.object({
     suppress_suggest: z.boolean(),
     suppress_until: z.string().nullable(),
   }),
+  /**
+   * 1.8 幂等指纹：最近 256 次写请求的 {id, fp, at, value}。
+   * 可选——旧 global.json 没有这个字段也能解析（不加版本戳，避免旧库被迫迁移）。
+   */
+  recent_requests: z.array(z.object({
+    id: z.string(),
+    fp: z.string(),
+    at: z.string(),
+    value: z.any().nullable(),
+  })).optional(),
 })
 
 export const initialMeta = (writer) => ({

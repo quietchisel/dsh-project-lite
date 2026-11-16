@@ -267,7 +267,13 @@ export function apply(ctx, config = {}) {
             degradation: d,
           })
         }
-        const out = await s.createProject({
+        // 1.8：指纹只取"决定结果"的字段；改一个字段就是另一个意图，同 requestId 必须被拒。
+        const actKey = JSON.stringify({
+          op: 'create', name: body.name, objective: body.objective, next_action: body.next_action,
+          done_when: body.done_when ?? null, tags: body.tags ?? null, session_id: body.session_id ?? null,
+          basis: body.basis ?? null, confidence: body.confidence ?? null, kind: body.kind ?? null, status,
+        })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.createProject({
           name: body.name,
           objective: body.objective,
           next_action: body.next_action,
@@ -278,13 +284,16 @@ export function apply(ctx, config = {}) {
           confidence: body.confidence,
           kind: body.kind,
           status,
-        })
-        await evidence({ phase: 'create-served', project_id: out.project.id })
-        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out.project, link: out.link })
+        }))
+        const out = claimed.value
+        await evidence({ phase: 'create-served', project_id: out.project.id, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out.project, link: out.link, replayed: claimed.replayed })
       } catch (error) {
         const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
         const message = String(error && error.message ? error.message : error)
-        const httpStatus = code === 'READONLY_DEGRADED' ? 409 : (code === 'INTERNAL_ERROR' ? 500 : 400)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT'
+          ? 409
+          : (code === 'INTERNAL_ERROR' ? 500 : 400)
         await evidence({ phase: 'create-error', code, message })
         // RECORD_INVALID 带上逐字段 issues：调用方要能自己看出是哪个字段不合法。
         const extra = Array.isArray(error && error.issues) ? { issues: error.issues } : {}
@@ -380,24 +389,29 @@ export function apply(ctx, config = {}) {
             }
           }
         } catch { registryChecked = false }
-        const out = await s.linkSession({
+        const actKey = JSON.stringify({
+          op: 'link', project_id, session_id, role,
+          basis: body.basis ?? null, confidence: body.confidence ?? null, expected_rev: body.expected_rev ?? null,
+        })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.linkSession({
           project_id,
           session_id,
           role,
           basis: body.basis,
           confidence: body.confidence,
           expected_rev: body.expected_rev,
-        })
+        }))
+        const out = claimed.value
         // changed 是 store 挂上去的不可枚举标记：内容完全相同 → false（零副作用）。
         const changed = out.changed === true
-        await evidence({ phase: 'link-served', changed, registryChecked })
-        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, changed, registryChecked })
+        await evidence({ phase: 'link-served', changed, registryChecked, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, changed, registryChecked, replayed: claimed.replayed })
       } catch (error) {
         const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
         const message = String(error && error.message ? error.message : error)
         const httpStatus = code === 'READONLY_DEGRADED' ? 409
           : code === 'PROJECT_NOT_FOUND' ? 404
-          : code === 'REV_CONFLICT' || code === 'EXPECTED_REV_REQUIRED' ? 409
+          : code === 'REV_CONFLICT' || code === 'EXPECTED_REV_REQUIRED' || code === 'REQUEST_ID_CONFLICT' ? 409
           : code === 'INTERNAL_ERROR' ? 500
           : 400
         await evidence({ phase: 'link-error', code, message })
