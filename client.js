@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
     const API_SESSIONS = 'api/project/sessions'
     const API_LINK = 'api/project/link'
     const API_ARCHIVE = 'api/project/archive'
+    const API_RESTORE = 'api/project/restore'
 
     /**
      * 1.8：一次"用户意图"一个 requestId。
@@ -190,6 +191,8 @@ window.__ModuleLoader__.load({
       // 归档二次确认：存 {id, name, rev}，用户点确认才真发请求。
       const [archiveAsk, setArchiveAsk] = useState(null)
       const [archiveErr, setArchiveErr] = useState(null)
+      // 恢复确认：与归档共用一套确认 UI，用 mode 区分。
+      const [restoreAsk, setRestoreAsk] = useState(null)
 
       /**
        * 提交新建。三条铁律：
@@ -291,6 +294,31 @@ window.__ModuleLoader__.load({
             setArchiveAsk(null)
             await loadOverview()
             // 重新拉详情，让归档后的 status 立刻可见。
+            await openDetail({ id: ask.id })
+          } else {
+            const er = json && json.error
+            setArchiveErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setArchiveErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, openDetail])
+
+      /** 恢复：与归档对称的二次确认流程。 */
+      const submitRestore = useCallback(async (ask) => {
+        if (!ask) return
+        setArchiveErr(null)
+        try {
+          const res = await fetch(API_RESTORE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: ask.id, expected_rev: ask.rev, requestId: newRequestId() }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setRestoreAsk(null)
+            await loadOverview()
             await openDetail({ id: ask.id })
           } else {
             const er = json && json.error
@@ -637,7 +665,11 @@ window.__ModuleLoader__.load({
                   'data-action': 'ask-archive', 'data-for': p.id,
                   onClick: () => { setArchiveErr(null); setArchiveAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
                 }, '归档')
-              : h('span', { style: C.tag }, '已归档'),
+              : h('button', {
+                  type: 'button', style: C.pickBtn,
+                  'data-action': 'ask-restore', 'data-for': p.id,
+                  onClick: () => { setArchiveErr(null); setRestoreAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                }, '恢复'),
           ),
           archiveAsk && archiveAsk.id === p.id
             ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-archive-confirm': '1' },
@@ -645,6 +677,12 @@ window.__ModuleLoader__.load({
                 archiveErr ? h('div', { style: C.err }, '归档失败：' + archiveErr) : null,
                 h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-archive', onClick: () => submitArchive(archiveAsk) }, '确认归档'),
                 h('button', { type: 'button', style: C.pickBtn, onClick: () => setArchiveAsk(null) }, '取消'))
+            : restoreAsk && restoreAsk.id === p.id
+            ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-restore-confirm': '1' },
+                '确认恢复「' + restoreAsk.name + '」？会移回 active 组。',
+                archiveErr ? h('div', { style: C.err }, '恢复失败：' + archiveErr) : null,
+                h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-restore', onClick: () => submitRestore(restoreAsk) }, '确认恢复'),
+                h('button', { type: 'button', style: C.pickBtn, onClick: () => setRestoreAsk(null) }, '取消'))
             : null,
           sec('project', '1 · 项目', 1, h('div', null,
             line('目标', p.objective),

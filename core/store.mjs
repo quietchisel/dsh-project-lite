@@ -383,6 +383,28 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       return next
     },
 
+    /**
+     * 恢复：把 archived 改回 active，只改一条 project 记录。
+     * 与 archiveProject 完全对称：expected_rev 防覆盖、写前 schema 校验、changelog、基线刷新。
+     */
+    async restoreProject(id, { expected_rev } = {}) {
+      assertWritable()
+      const before = domain.table('project').get(id)
+      if (!before) throw new StoreError('PROJECT_NOT_FOUND', id)
+      if (before.status !== 'archived') {
+        throw new StoreError('NOT_ARCHIVED', '项目不是归档状态，无需恢复（当前 ' + before.status + '）')
+      }
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+      const next = { ...before, status: 'active', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
+      assertRecord('project', next)
+      await domain.table('project').put(id, next)
+      await writeLog('restore', 'project', id, '恢复归档（子记录零改动）', before.rev, next.rev)
+      await refreshBaseline()
+      return next
+    },
+
     project: (id) => domain.table('project').get(id),
     projects: () => [...domain.table('project').entries()].map(([, v]) => v),
     links: () => [...domain.table('project_session').entries()].map(([, v]) => v),

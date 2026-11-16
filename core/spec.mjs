@@ -104,7 +104,7 @@ export const ChangelogSchema = z.object({
   id: z.string().regex(/^log_[0-9A-HJKMNP-TV-Z]{26}$/),
   at: Iso,
   actor: z.string().min(1),
-  op: z.enum(['create', 'update', 'link', 'unlink', 'archive']),
+  op: z.enum(['create', 'update', 'link', 'unlink', 'archive', 'restore']),
   target_table: z.string().min(1),
   target_key: z.string().min(1),
   summary: z.string().min(1),

@@ -186,11 +186,11 @@ push('C2', flat.text.some((t) => t.includes('通过')), '3 次主轮询后对账
 push('D1', (src.match(/slots\.inject\(/g) || []).length === 3, '注入 3 个 slot（main + sidebar.panellist + shell.overlay 浮层）')
 // 1.3 起源码里**有**一个写入口（新建项目）。边界改成：写路径只能有一条，且只能是 POST api/project/create。
 // 1.4 起：两个写端点（create / link），三处调用点（面板建项目、面板关联、右键浮层关联）。
-push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 4
+push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 5
   && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
-  && src.includes("API_ARCHIVE = 'api/project/archive'")
+  && src.includes("API_ARCHIVE = 'api/project/archive'") && src.includes("API_RESTORE = 'api/project/restore'")
   && !/删除项目|deleteProject/.test(src),
-  '三个写端点（create + link + archive）/ 四处 POST 调用点，无删除按钮')
+  '四个写端点（create + link + archive + restore）/ 五处 POST 调用点，无删除按钮')
 push('D3', src.includes("const API_OVERVIEW = 'api/project/overview'"), 'overview 走只读 GET 相对路径')
 push('D4', src.includes('const [ovData, setOvData]') && src.includes('const [ovError, setOvError]'), 'overview 用独立 state')
 
