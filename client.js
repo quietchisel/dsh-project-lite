@@ -460,7 +460,16 @@ window.__ModuleLoader__.load({
        * 候选行的标题来自会话缓存，缓存里没有就显示 session id —— 不编造标题。
        */
       const linkPicker = linkFor ? h('div', { style: C.picker, 'data-link-form': '1', 'data-link-project': linkFor.id },
-        h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
+        // 「收起」必须固定在标题行：放到滚动区底部时，候选一多就滚出视野，收不起来（2026-11-16 反馈）。
+        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', marginBottom: '8px' } },
+          h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
+          h('button', {
+            type: 'button',
+            style: C.pickBtn,
+            'data-action': 'close-link',
+            onClick: () => { setLinkFor(null); setLinkData(null); setLinkErr(null); setLinkDone(null) },
+          }, '收起'),
+        ),
         linkErr ? h('div', { style: C.err, role: 'alert', 'data-link-error': '1' }, '关联失败：' + linkErr) : null,
         linkDone ? h('div', { style: C.done, 'data-link-done': '1' }, linkDone) : null,
         h('label', { style: C.field },
@@ -498,11 +507,6 @@ window.__ModuleLoader__.load({
             )
           : h('div', { style: C.empty }, linkBusy ? '读取会话列表…' : '（还没有候选）'),
         h('div', { style: C.hint }, '关联是幂等的：同一条重复点，rev / changelog / 基线都不会动。会话必须先在 DSH 注册表里存在。'),
-        h('button', {
-          type: 'button',
-          style: C.btn,
-          onClick: () => { setLinkFor(null); setLinkData(null); setLinkErr(null); setLinkDone(null) },
-        }, '收起'),
       ) : null
 
       /**
