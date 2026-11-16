@@ -11,6 +11,26 @@
 - 归档 / 恢复
 - 接入 DSH 会话注册表，让对账第 3 条不再恒为 `skipped`
 
+## [0.3.0] - 2026-11-16
+
+### 新增：1.4 关联会话
+
+- `GET /api/project/sessions`：会话候选列表。**会话归属**读 `<storages>/workspace.json`（25 个工作区 / 221 条 sessionIds / 约 50KB，毫秒级）；**会话标题**读 `session_projcache/sessions/<uuid>.json`，按 mtime 缓存、只在真要显示时才读（546 个文件共 25.7MB，不全量扫）。缓存里没有标题就返回 `null`，界面回落到 session id，**不编造标题**。
+- `POST /api/project/link`：把会话挂到项目上。幂等由 `store.linkSession` 保证（确定性键 + 内容相同则零副作用），路由层不重复实现。负例闸：会话不在注册表 → `400 SESSION_NOT_FOUND`，不许手拼 id 造孤儿；缺 `basis` → `400 BASIS_REQUIRED`。
+- 面板：项目行「关联会话」→ 选择器（搜索 + 候选 + 「已经关联过了，零副作用」提示）。
+- 会话右键「加入项目…」→ 浮层选项目。该入口包在 `try` 里：`shell.overlay` 或 `contextMenus` 不可用时只少一个入口，**不影响面板本身**。
+- 对账第 3 条（`link.session_id` 在 DSH 注册表里存在）从**恒 `skipped`** 变为真实判定：会话都在 → `pass`；会话被删 → `fail` 但 `scope=external`，**不降级**（删会话是正常操作，不该把库锁成只读）；注册表读不到 → 仍 `skipped`，绝不报 `pass`。
+
+### 变更
+- 对账计数预期从 `8/0/1` 变为 `9/0/0`（第 3 条不再恒为未检查）
+- 新增 `test/s17-link-session.mjs`（29 项）：真幂等三次零写盘、四个负例零写盘、会话被删 fail 不降级、注册表缺失 skipped 不报 pass
+
+### 测试
+- 150/150 通过（s12 32 / s13 28 / s14 21 / s15 21 / s16 19 / s17 29）
+
+### 已知边界
+- 刚建的会话在 `workspace.json` 里立刻有，但 `projcache` 的标题文件可能还没落盘 → 标题为 `null`（界面回落，不编造）
+- 会话右键入口只有 Node 层静态覆盖（slot / 菜单注册形状），**行为与真实桌面未验证**
 ## [0.2.1] - 2026-11-16
 
 ### 修复

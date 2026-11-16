@@ -6,7 +6,7 @@
  *   - 提交成功：POST 到 api/project/create、body 正确、成功后立刻重拉 overview、表单清空
  *   - 提交失败：后端 {code,message} 显示出来，主面板不白屏
  *   - 降级态：表单 readonly、按钮 disabled、写明原因，且**点也不发请求**（前端闸）
- *   - 静态边界：仍然只有 2 个 slot，只有一条 POST 写路径
+ *   - 静态边界：3 个 slot；写端点只有 create 与 link 两个
  *
  * 如实标注：本套件是 Node 层渲染回归，不是真实 Desktop 截图。
  *
@@ -203,8 +203,10 @@ await flush()
 push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '降级态即使触发 onClick 也不发请求（前端闸）')
 
 // --- 静态边界 ---
-push('E18', (src.match(/slots\.inject\(/g) || []).length === 2, '仍然只注入 2 个 slot')
-push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 2, '源码里两处 POST（create + link），无第三处')
+push('E18', (src.match(/slots\.inject\(/g) || []).length === 3, '注入 3 个 slot（main + sidebar.panellist + shell.overlay）')
+push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 3
+  && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'"),
+  '三处 POST 调用点，端点只有 create 与 link 两个')
 push('E20', src.includes("const API_CREATE = 'api/project/create'"), '写路径常量就是 api/project/create')
 
 const pass = steps.filter((s) => s.ok).length

@@ -60,6 +60,9 @@ window.__ModuleLoader__.load({
       done: { fontSize: '11px', padding: '4px 8px', borderRadius: '6px', marginBottom: '8px', background: 'rgba(30,142,62,0.10)', color: '#0d652d', wordBreak: 'break-all' },
       hint: { fontSize: '11px', opacity: 0.7, marginTop: '6px' },
       pickBtn: { marginTop: '4px', fontSize: '11px', padding: '2px 8px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.4)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
+      // 用 CSS 系统色（Canvas / CanvasText），跟随主题，不写死明暗。
+      overlayMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.38)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 },
+      overlayBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '10px', padding: '14px 16px', minWidth: '340px', maxWidth: '520px', maxHeight: '70vh', overflow: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.28)' },
     }
 
     /**
@@ -72,6 +75,21 @@ window.__ModuleLoader__.load({
       const sev = c.severity === 'degraded' ? '降级' : (c.severity === 'unverified' ? '未验证' : '')
       return sev ? scope + ' · ' + sev : scope
     }
+
+    /**
+     * 1.4b：会话侧入口 ↔ 浮层 的共享请求。
+     * 不引第三方 store：一个变量 + 订阅集合就够，也少一个依赖。
+     */
+    function createLinkRequest() {
+      let value = null
+      const subs = new Set()
+      return {
+        get: () => value,
+        set: (v) => { value = v; for (const fn of subs) { try { fn(v) } catch (e) { /* 单个订阅者出错不影响别人 */ } } },
+        subscribe: (fn) => { subs.add(fn); return () => subs.delete(fn) },
+      }
+    }
+    const linkRequest = createLinkRequest()
 
     function Panel() {
       const [data, setData] = useState(null)
@@ -454,6 +472,89 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 1.4b：会话右键「加入项目…」打开的浮层。
+     * 只做一件事：把这个 session 挂到选中的项目上。项目列表复用 overview，不另开接口。
+     */
+    function LinkOverlay() {
+      const [req, setReq] = useState(linkRequest.get())
+      const [rows, setRows] = useState(null)
+      const [err, setErr] = useState(null)
+      const [done, setDone] = useState(null)
+      const [busy, setBusy] = useState(false)
+
+      useEffect(() => linkRequest.subscribe(setReq), [])
+
+      useEffect(() => {
+        if (!req) return undefined
+        let alive = true
+        fetch(API_OVERVIEW, { cache: 'no-store' })
+          .then((res) => res.json())
+          .then((json) => {
+            if (!alive) return
+            if (json && json.ok) {
+              const items = []
+              for (const g of (json.groups || [])) for (const p of (g.items || [])) items.push(p)
+              setRows(items); setErr(null)
+            } else {
+              setRows(null); setErr('读不到项目列表')
+            }
+          })
+          .catch((e) => { if (alive) { setRows(null); setErr(String(e && e.message ? e.message : e)) } })
+        return () => { alive = false }
+      }, [req])
+
+      if (!req) return null
+      const close = () => { linkRequest.set(null); setDone(null); setErr(null); setRows(null) }
+      const link = async (p) => {
+        setBusy(true); setErr(null); setDone(null)
+        try {
+          const res = await fetch(API_LINK, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ project_id: p.id, session_id: req.sessionId, basis: '会话右键关联' }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setDone((json.changed ? '已加入：' : '本来就在里面，零副作用：') + (p.name || p.id))
+          } else {
+            const er = json && json.error
+            setErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setErr(String(e && e.message ? e.message : e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { style: C.overlayMask, 'data-link-overlay': '1' },
+        h('div', { style: C.overlayBox },
+          h('div', { style: C.formTitle }, '把这个会话加入项目'),
+          h('div', { style: C.projMeta }, req.displayTitle || req.sessionId),
+          h('div', { style: C.muted }, req.sessionId),
+          err ? h('div', { style: C.err, role: 'alert', 'data-overlay-error': '1' }, '失败：' + err) : null,
+          done ? h('div', { style: C.done, 'data-overlay-done': '1' }, done) : null,
+          rows === null
+            ? h('div', { style: C.empty }, '读取项目列表…')
+            : rows.length === 0
+              ? h('div', { style: C.empty }, '还没有项目。先到侧栏「项目」里建一个。')
+              : rows.map((p) => h('div', { key: 'op' + p.id, style: C.proj, 'data-overlay-project': p.id },
+                  h('div', { style: C.projName }, p.name || p.id),
+                  h('div', { style: C.projMeta }, p.next_action || '—'),
+                  h('button', {
+                    type: 'button',
+                    style: C.pickBtn,
+                    disabled: busy,
+                    'data-action': 'overlay-link',
+                    onClick: () => link(p),
+                  }, '加入'),
+                )),
+          h('button', { type: 'button', style: C.btn, onClick: close }, '关闭'),
+        ))
+    }
+
     /** 侧栏行图标（12 行）。keyed main 没有入口就永远打不开——这是 2026-11-14 桌面实测的结论。 */
     function PanelIcon() {
       return h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true' },
@@ -474,6 +575,47 @@ window.__ModuleLoader__.load({
           order: 120,
           label: () => '项目',
         }, PanelIcon))
+
+        /**
+         * 1.4b：会话右键「加入项目…」。
+         * 两段都包在 try 里——浮层 slot 或 contextMenus 不可用时，少一个入口而已，
+         * 绝不能因此让「项目」面板本身打不开（面板是主功能，右键是加分项）。
+         */
+        try {
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'project-lite-link',
+            order: 300,
+          }, LinkOverlay))
+        } catch (e) { /* 没有 shell.overlay 就只保留面板侧入口 */ }
+
+        try {
+          if (typeof ctx.inject === 'function') {
+            ctx.inject(['contextMenus'], (child) => {
+              const menus = child.contextMenus
+              if (!menus || typeof menus.register !== 'function') return
+              child.effect(() => menus.register({
+                id: 'project-lite.add-to-project',
+                target: 'session',
+                order: 260,
+                resolve: (target) => {
+                  const sessionId = target && target.sessionId
+                  if (!sessionId) return []
+                  return [{
+                    id: 'project-lite.add-to-project',
+                    label: '加入项目…',
+                    run: () => {
+                      linkRequest.set({
+                        sessionId,
+                        displayTitle: (target && target.displayTitle) || sessionId,
+                      })
+                    },
+                  }]
+                },
+              }), 'project-lite: session menu')
+            })
+          }
+        } catch (e) { /* contextMenus 不可用就少一个入口，面板不受影响 */ }
       },
     }
   },
