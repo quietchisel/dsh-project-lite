@@ -137,7 +137,8 @@ window.__ModuleLoader__.load({
               name: form.name,
               objective: form.objective,
               next_action: form.next_action,
-              done_when: form.done_when || undefined,
+              // schema 要 string[]（一个输入框 → 单元素数组）；服务端也会归一化，这里是第一道。
+              done_when: form.done_when.trim() ? [form.done_when.trim()] : undefined,
             }),
           })
           let json = null

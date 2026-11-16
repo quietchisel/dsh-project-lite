@@ -137,6 +137,7 @@ const setField = (key, val) => {
 setField('name', '新项目甲')
 setField('objective', '验证写入口')
 setField('next_action', '跑一次完整回归')
+setField('done_when', '一次回归全绿')
 tree = render()
 const ovCallsBefore = calls.filter((c) => c.url.includes('overview')).length
 const btn = byAttr(tree, 'data-action', 'create-project')[0]
@@ -153,6 +154,9 @@ try {
   bodyOk = b.name === '新项目甲' && b.objective === '验证写入口' && b.next_action === '跑一次完整回归'
 } catch { bodyOk = false }
 push('E6', bodyOk, 'POST body 三个必填字段都带上了')
+let dwOk = false
+try { const b = JSON.parse(post.body); dwOk = Array.isArray(b.done_when) && b.done_when.length === 1 && b.done_when[0] === '一次回归全绿' } catch { dwOk = false }
+push('E6b', dwOk, 'done_when 以 string[] 提交（不是裸字符串）')
 push('E7', calls.filter((c) => c.url.includes('overview')).length === ovCallsBefore + 1, '成功后立刻重拉了一次 overview')
 push('E8', flat.text.some((t) => t.includes('已建项目：新项目甲')), '成功提示可见')
 const nameInput = byAttr(tree, 'data-field', 'name')[0]

@@ -270,7 +270,9 @@ export function apply(ctx, config = {}) {
         const message = String(error && error.message ? error.message : error)
         const httpStatus = code === 'READONLY_DEGRADED' ? 409 : (code === 'INTERNAL_ERROR' ? 500 : 400)
         await evidence({ phase: 'create-error', code, message })
-        return writeJson(res, httpStatus, errorBody(code, message))
+        // RECORD_INVALID 带上逐字段 issues：调用方要能自己看出是哪个字段不合法。
+        const extra = Array.isArray(error && error.issues) ? { issues: error.issues } : {}
+        return writeJson(res, httpStatus, { ...errorBody(code, message), ...extra })
       }
     },
   }))

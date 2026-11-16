@@ -79,10 +79,14 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 `POST /api/project/create` 的 body：
 
 ```json
-{ "name": "必填，≤40 字", "objective": "必填", "next_action": "必填，4-60 字", "done_when": "可选" }
+{ "name": "必填，≤40 字", "objective": "必填", "next_action": "必填，4-60 字", "done_when": ["可选", "字符串数组"] }
 ```
 
-错误码：`METHOD_NOT_ALLOWED`(405) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `READONLY_DEGRADED`(409) / `INTERNAL_ERROR`(500)。
+`done_when` 传字符串也行（含多行会按行拆成多项），服务端统一归一化成 `string[]`；空值不落盘。
+
+**所有写入在落盘前都会用读路径同一份 schema 校验**（`spec.tables[*].valueSchema`）：不合法直接 `RECORD_INVALID`，一个字节都不写。这一层不能省——域层只在开库时校验磁盘记录，`put` 不校验，漏了这一层就会出现「写得进去、下次开库被隔离、整库降级只读」（0.2.1 修的就是这个）。
+
+错误码：`METHOD_NOT_ALLOWED`(405) / `JSON_REQUIRED`(415) / `BAD_JSON`(400) / `INVALID_INPUT`(400) / `NEXT_ACTION_INVALID`(400) / `RECORD_INVALID`(400，带 `issues`) / `READONLY_DEGRADED`(409) / `INTERNAL_ERROR`(500)。
 
 `next_action` 会被拒的情形：空、短于 4 字、长于 60 字、命中态度词黑名单（`继续推进` / `推进` / `待定` / `深入研究` / `tbd` / `todo` 等）。**「下一步」必须是能直接执行的动作，不是态度。**
 

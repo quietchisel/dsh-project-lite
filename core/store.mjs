@@ -9,6 +9,19 @@ import { buildSpec, TABLES, VERSION, MetaSchema } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
 import { newProjectId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
 
+/**
+ * done_when 归一化：表单只给一个输入框（字符串），schema 要的是 string[]。
+ *
+ * 不归一化就会把字符串原样落盘 → 下次开库时被域层 backup-and-skip 隔离
+ * → 计数对不上基线 → 整库降级只读。2026-11-16 真实发生（错误账本 E-10）。
+ */
+export function normalizeDoneWhen(v) {
+  if (v === undefined || v === null) return undefined
+  const list = Array.isArray(v) ? v : String(v).split(/\r?\n/)
+  const items = list.map((s) => String(s).trim()).filter((s) => s.length > 0)
+  return items.length > 0 ? items : undefined
+}
+
 export class StoreError extends Error {
   constructor(code, message, extra = {}) {
     super(message)
@@ -101,6 +114,28 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     if (!verdict.writable) {
       throw new StoreError('READONLY_DEGRADED', '域处于只读降级：' + verdict.criteria.map(c => c.code).join(','), { criteria: verdict.criteria })
     }
+  }
+
+  /**
+   * 写前校验：用**读路径同一份 schema**（spec.tables[t].valueSchema）校验待写记录。
+   *
+   * 为什么必须有这一层：域层只在 open 时校验磁盘上的记录，put 不校验。
+   * 于是"写的时候不合法"要等到下次开库才暴露，代价是那条记录被隔离 + 整库降级只读。
+   * 这一层把失败挪到写的那一刻：抛 RECORD_INVALID，一个字节都不落盘。
+   */
+  function assertRecord(table, record) {
+    const schema = spec.tables[table]?.valueSchema
+    if (schema === undefined) throw new StoreError('RECORD_INVALID', `表 ${table} 没有声明 schema`)
+    const res = schema.safeParse(record)
+    if (!res.success) {
+      const issues = res.error.issues.map((i) => ({ path: i.path.join('.'), code: i.code, message: i.message }))
+      throw new StoreError(
+        'RECORD_INVALID',
+        `${table} 记录未通过 schema 校验：` + issues.map((i) => `${i.path} ${i.message}`).join('；'),
+        { issues, table },
+      )
+    }
+    return res.data
   }
 
   /**
@@ -198,10 +233,12 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
 
   async function writeLog(op, targetTable, targetKey, summary, beforeRev, afterRev) {
     const id = newLogId()
-    await domain.table('changelog').put(id, {
+    const rec = {
       id, at: nowIso(), actor, op, target_table: targetTable, target_key: targetKey,
       summary, before_rev: beforeRev ?? null, after_rev: afterRev ?? null,
-    })
+    }
+    assertRecord('changelog', rec)
+    await domain.table('changelog').put(id, rec)
   }
 
   Object.assign(store, {
@@ -219,8 +256,10 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         kind, status, confidence, basis: basis ?? ('用户确认 ' + now.slice(0, 10)),
         created_at: now, updated_at: now, updated_by: actor, rev: 1,
       }
-      if (done_when) record.done_when = done_when
+      const dw = normalizeDoneWhen(done_when)
+      if (dw) record.done_when = dw
       if (legacy_refs) record.legacy_refs = legacy_refs
+      assertRecord('project', record)
       await domain.table('project').put(id, record)
       let link = null
       if (session_id) {
@@ -269,6 +308,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
           throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + existing.rev, { expected_rev, actual: existing.rev })
         }
         const next = { ...existing, role, confidence, basis: basisText, source, rev: existing.rev + 1 }
+        assertRecord('project_session', next)
         await domain.table('project_session').put(id, next)
         await writeLog('link', 'project_session', id, '改挂会话 ' + session_id.slice(0, 16) + '… → ' + role, existing.rev, next.rev)
         await refreshBaseline()
@@ -279,6 +319,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         id, project_id, session_id, role, confidence, basis: basisText, source,
         created_at: nowIso(), rev: 1,
       }
+      assertRecord('project_session', record)
       await domain.table('project_session').put(id, record)
       await writeLog('link', 'project_session', id, '挂会话 ' + session_id.slice(0, 16) + '… → ' + role, null, 1)
       await refreshBaseline()
@@ -293,7 +334,9 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
-      const next = await domain.table('project').update(id, (cur) => ({ ...cur, status: 'archived', updated_at: nowIso(), updated_by: actor, rev: cur.rev + 1 }))
+      const next = { ...before, status: 'archived', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
+      assertRecord('project', next)
+      await domain.table('project').put(id, next)
       await writeLog('archive', 'project', id, '归档（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
