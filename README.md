@@ -71,7 +71,7 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 |---|---|---|---|
 | GET | `/api/project/state` | `reconcile=1`（可选） | 降级原因 + 检查状态；带 `reconcile=1` 会跑一次对账并落盘 `last_reconcile_*` |
 | GET | `/api/project/overview` | — | 四组项目 + 计数 + `writable` / `degradation` |
-| GET | `/api/project/get` | `id` | 单项目详情（关联会话/工作区/交付物/changelog）；找不到返回 `found:false`，不是 500 |
+| GET | `/api/project/get` | `id` | 单项目详情（六分区：项目/会话/工作区/交付物/变更记录/依据）+ `counts` + `unconfirmed`；`logs` 倒序上限 100；找不到返回 `found:false`，不是 500 |
 | GET | `/api/project/links-of-session` | `session_id` | 某会话属于哪些项目 |
 | GET | `/api/project/search` | `q`，`status`（可选） | 在 name/objective/next_action/tags 里大小写不敏感匹配 |
 | POST | `/api/project/create` | JSON body | 建项目。写入口之一 |
@@ -127,8 +127,8 @@ test/               回归（见下节）
 ```bash
 npm run check      # 两个入口的语法门禁
 npm test           # 界面层 48 条（s13 渲染 28 + s15 新建表单 20）——零依赖，任何机器可跑
-npm run test:core  # core 层 101 条（s12 32 + s14 21 + s16 19 + s17 29）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 150 条
+npm run test:core  # core 层 115 条（s12 32 + s14 21 + s16 19 + s17 29 + s18 14）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 178 条
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：

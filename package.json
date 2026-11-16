@@ -1,6 +1,6 @@
 {
   "name": "dsh-project-lite",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "DSH 轻量项目面板：完整性闸 + 降级即只读，项目数据对不上就拒绝写入并说明原因",
@@ -46,9 +46,9 @@
   "scripts": {
     "check": "node --check index.js && node --check client.js",
     "pretest": "node -e \"require('node:fs').mkdirSync('.tmp',{recursive:true})\"",
-    "test": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json",
+    "test": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json && node test/s19-detail-ui.mjs .tmp/s19.json",
     "test:core": "node test/s12-read-routes.mjs .tmp/base-s12 .tmp/s12.json && node test/s14-create-route.mjs .tmp/base-s14 .tmp/s14.json && node test/s16-write-read-agree.mjs .tmp/base-s16 .tmp/s16.json && node test/s17-link-session.mjs .tmp/base-s17 .tmp/s17.json && node test/s18-detail-read.mjs .tmp/base-s18 .tmp/s18.json",
-    "test:all": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json && node test/s12-read-routes.mjs .tmp/base-s12 .tmp/s12.json && node test/s14-create-route.mjs .tmp/base-s14 .tmp/s14.json && node test/s16-write-read-agree.mjs .tmp/base-s16 .tmp/s16.json && node test/s17-link-session.mjs .tmp/base-s17 .tmp/s17.json"
+    "test:all": "node test/s13-overview-panel.mjs .tmp/s13.json && node test/s15-create-form.mjs .tmp/s15.json && node test/s19-detail-ui.mjs .tmp/s19.json && node test/s12-read-routes.mjs .tmp/base-s12 .tmp/s12.json && node test/s14-create-route.mjs .tmp/base-s14 .tmp/s14.json && node test/s16-write-read-agree.mjs .tmp/base-s16 .tmp/s16.json && node test/s17-link-session.mjs .tmp/base-s17 .tmp/s17.json && node test/s18-detail-read.mjs .tmp/base-s18 .tmp/s18.json"
   },
   "repository": {
     "type": "git",
