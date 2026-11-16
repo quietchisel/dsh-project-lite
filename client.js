@@ -90,6 +90,8 @@ window.__ModuleLoader__.load({
         border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px', marginTop: '12px',
         maxHeight: '62vh', overflowY: 'auto', boxSizing: 'border-box',
       },
+      // 列表行「未确认」徽标（点开看依据），与详情第 6 区同源数据。
+      basisBadge: { display: 'inline-block', fontSize: '10px', lineHeight: '15px', padding: '0 5px', borderRadius: '999px', border: '1px solid #b06000', color: '#b06000', marginLeft: '6px', cursor: 'pointer' },
       overlayMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.38)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 },
       overlayBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '10px', padding: '14px 16px', minWidth: '340px', maxWidth: '520px', maxHeight: '70vh', overflow: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.28)' },
     }
@@ -182,6 +184,8 @@ window.__ModuleLoader__.load({
 
       // 详情页（六分区）：只服务一个项目，同时只开一个。
       const [detail, setDetail] = useState(null)
+      // 列表行「未确认」徽标点开的依据浮层（只服务一条项目）。
+      const [basisFor, setBasisFor] = useState(null)
 
       /**
        * 提交新建。三条铁律：
@@ -399,7 +403,16 @@ window.__ModuleLoader__.load({
                   'data-action': 'open-detail',
                   'data-for': p.id,
                   onClick: () => openDetail(p),
-                }, p.name || '(未命名)')),
+                }, p.name || '(未命名)'),
+                p.confidence === 'inferred'
+                  ? h('span', {
+                      style: C.basisBadge,
+                      'data-action': 'show-basis',
+                      'data-for': p.id,
+                      onClick: () => setBasisFor(p),
+                    }, '未确认')
+                  : null,
+              ),
               h('div', { style: C.projMeta }, '目标：' + (p.objective || '—')),
               h('div', { style: C.projMeta }, '下一步：' + (p.next_action || '—')),
               h('button', {
@@ -527,6 +540,22 @@ window.__ModuleLoader__.load({
         h('div', { style: C.hint }, '关联是幂等的：同一条重复点，rev / changelog / 基线都不会动。会话必须先在 DSH 注册表里存在。'),
       ) : null
 
+      /** 列表行「未确认」徽标点开的依据浮层：basis + legacy_refs，与详情第 6 区同源。 */
+      const basisOverlay = basisFor ? h('div', { style: C.overlayMask, 'data-basis-overlay': '1' },
+        h('div', { style: C.overlayBox },
+          h('div', { style: C.formTitle }, '依据：' + (basisFor.name || basisFor.id)),
+          h('div', { style: C.projMeta }, 'confidence：' + (basisFor.confidence || '—')),
+          h('div', { style: C.item }, '依据：' + (basisFor.basis || '—')),
+          Array.isArray(basisFor.legacy_refs) && basisFor.legacy_refs.length
+            ? h('div', null,
+                h('div', { style: C.groupHead }, '历史来源（' + basisFor.legacy_refs.length + ' 条）'),
+                basisFor.legacy_refs.map((r, i) => h('div', { key: 'br' + i, style: C.item },
+                  (r.kind || '?') + ' · ' + (r.original_id || '') + ' · ' + (r.source_doc || '') + ' · ' + (r.note || ''))))
+            : h('div', { style: C.empty }, '没有登记历史来源（legacy_refs 为空）。'),
+          h('button', { type: 'button', style: C.btn, onClick: () => setBasisFor(null) }, '关闭'),
+        )
+      ) : null
+
       /**
        * 详情页六分区（路线图硬约束：每区空态都必须有一句话，不许空白）。
        * 徽标只认 confidence==='inferred'；未确认清单由后端算好（unconfirmed），前端不重算。
@@ -591,6 +620,7 @@ window.__ModuleLoader__.load({
         banner,
         status,
         projectList,
+        basisOverlay,
         detailView,
         linkPicker,
         createForm,

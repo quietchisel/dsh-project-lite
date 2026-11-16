@@ -49,7 +49,7 @@ const byAttr = (tree, k, v) => findAll(tree, (n) => n.props && n.props[k] === v)
 const OVERVIEW = {
   ok: true, writable: true, degraded: false, metaState: 'ok', total: 1,
   counts: { active: 1, paused: 0, done: 0, archived: 0 },
-  groups: [{ key: 'active', count: 1, items: [{ id: 'prj_A', name: '详情项目', objective: 'o', next_action: 'n', status: 'active' }] }],
+  groups: [{ key: 'active', count: 1, items: [{ id: 'prj_A', name: '详情项目', objective: 'o', next_action: 'n', status: 'active', confidence: 'inferred', basis: '推断依据', legacy_refs: [{ kind: 'project', original_id: 'old_1', source_doc: '旧台账', note: '迁移过来' }] }] }],
   degradation: { degraded: false, writable: true },
 }
 const STATE = { ok: true, root: 'R', writable: true, metaState: 'ok', counts: {}, degradation: { degraded: false },
@@ -165,6 +165,23 @@ push('T16', !!dn && String(dn.props.style.gridTemplateColumns).includes('auto-fi
 const wrapNode = findAll(tree, (n) => n.props && n.props['data-project-lite'] === 'panel')[0]
 push('T17', !!wrapNode && String(wrapNode.props.style.maxWidth) === 'none' && String(wrapNode.props.style.width) === '100%', '外层容器随窗口流式（maxWidth=none / width=100%）')
 push('T19', !!wrapNode && String(wrapNode.props.style.overflowY) === 'auto' && String(wrapNode.props.style.maxHeight).length > 0, '面板整体可滚（窗口缩小时能看下面）')
+
+// --- 列表行「未确认」徽标 + 依据浮层 ---
+tree = render()
+const badge = byAttr(tree, 'data-action', 'show-basis')[0]
+push('T20', !!badge && badge.props['data-for'] === 'prj_A', 'inferred 项目行有「未确认」徽标（可点）')
+badge.props.onClick()
+await flush()
+tree = render()
+const bo = findAll(tree, (n) => n.props && n.props['data-basis-overlay'] === '1')[0]
+const botxt = bo ? JSON.stringify(bo) : ''
+push('T21', !!bo && botxt.includes('推断依据') && botxt.includes('旧台账'), '点徽标弹出依据浮层，显示 basis 与 legacy_refs')
+const closeB = bo ? findAll(bo, (n) => n && n.type === 'button' && Array.isArray(n.children) && n.children.includes('关闭'))[0] : null
+push('T22', !!closeB, '依据浮层有关闭按钮')
+closeB && closeB.props.onClick()
+await flush()
+tree = render()
+push('T23', !findAll(tree, (n) => n.props && n.props['data-basis-overlay'] === '1').length, '关闭后浮层消失')
 
 // --- 关联会话选择器也要能滚（50 条候选会撑爆面板）---
 byAttr(tree, 'data-action', 'open-link')[0].props.onClick()
