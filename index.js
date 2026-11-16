@@ -22,6 +22,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { openStore } from './core/store.mjs'
 import { createReadService } from './core/read.mjs'
+import { createSessionRegistry } from './core/sessions.mjs'
 
 export const name = 'project-lite'
 /** storageDomain 来自 dsh-base；webServer 只有 web/desktop 应用层有（acp 没有，所以那里不激活）。 */
@@ -39,6 +40,11 @@ export const READ_PATHS = {
 
 /** 1.3 唯一的写入口。 */
 export const CREATE_PATH = '/api/project/create'
+
+/** 1.4：会话候选列表（只读）。 */
+export const SESSIONS_PATH = '/api/project/sessions'
+/** 1.4：第二个写入口——把会话挂到项目上（复用 store.linkSession 的真幂等）。 */
+export const LINK_PATH = '/api/project/link'
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -88,6 +94,8 @@ export function apply(ctx, config = {}) {
   // 域根：默认 = <home>/storages（dsh-base 的 root）；可用 env / config 指向夹具目录。
   const root = config.root || process.env.DSH_PROJECT_ROOT || join(dshHome(), 'storages')
   const evidencePath = config.evidencePath || join(dshHome(), 'project-lite', 'evidence.jsonl')
+  // 1.4：会话注册表与项目域同根（都读 <home>/storages），不另配一个路径。
+  const registry = createSessionRegistry({ root })
 
   async function evidence(obj) {
     if (!evidencePath) return
@@ -123,7 +131,14 @@ export function apply(ctx, config = {}) {
       degradation: s.degradationReport(),
     }
     if (reconcile) {
-      const r = await s.reconcile()
+      // 1.4：对账第 3 条要外部注册表。读不到就传 undefined —— 那条保持 skipped（"没查"），
+      // 绝不因为"读不到"就报 pass。会话被删导致的 dangling 判 fail，但 scope=external，不降级。
+      let sessionExists
+      try {
+        const snap = await registry.snapshot()
+        if (snap.ok) sessionExists = registry.existsFn(snap)
+      } catch { sessionExists = undefined }
+      const r = await s.reconcile({ sessionExists })
       out.reconcile = {
         pass: r.pass, fail: r.fail, skipped: r.skipped, total: r.total,
         persisted: r.persisted, coreUnavailable: r.coreUnavailable,
@@ -271,6 +286,120 @@ export function apply(ctx, config = {}) {
         const httpStatus = code === 'READONLY_DEGRADED' ? 409 : (code === 'INTERNAL_ERROR' ? 500 : 400)
         await evidence({ phase: 'create-error', code, message })
         // RECORD_INVALID 带上逐字段 issues：调用方要能自己看出是哪个字段不合法。
+        const extra = Array.isArray(error && error.issues) ? { issues: error.issues } : {}
+        return writeJson(res, httpStatus, { ...errorBody(code, message), ...extra })
+      }
+    },
+  }))
+
+  // ---- 1.4 只读：会话候选列表 ----
+  // 只读路由继续用 resource（Fetch 形状）。注册表读不到时给 REGISTRY_UNAVAILABLE，
+  // 让界面明说"读不到会话注册表"，而不是显示一个空列表假装"没有会话"。
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: SESSIONS_PATH,
+    resource: async (request) => {
+      if (request.method && request.method !== 'GET') {
+        return jsonResponse(errorBody('METHOD_NOT_ALLOWED', 'only GET is allowed: ' + SESSIONS_PATH), 405)
+      }
+      const url = new URL(request.url)
+      try {
+        const data = await registry.list({
+          q: url.searchParams.get('q') || '',
+          limit: url.searchParams.get('limit') || 50,
+        })
+        if (!data.ok) {
+          await evidence({ phase: 'sessions-unavailable', reason: data.reason })
+          return jsonResponse(errorBody('REGISTRY_UNAVAILABLE', data.reason || '读不到 DSH 会话注册表'), 200)
+        }
+        await evidence({ phase: 'sessions-served', matched: data.matched, returned: data.sessions.length })
+        return jsonResponse({ ...data, at: new Date().toISOString() })
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error)
+        await evidence({ phase: 'sessions-error', error: message })
+        return jsonResponse(errorBody('INTERNAL_ERROR', message), 500)
+      }
+    },
+  }))
+
+  // ---- 1.4 写入口：把会话挂到项目 ----
+  // 幂等由 store.linkSession 保证（确定性键 + 内容相同则零副作用），路由层不重复实现。
+  const LINK_ALLOWED_ROLES = ['primary', 'supporting']
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: LINK_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + LINK_PATH))
+      }
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) {
+        return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      }
+      let body
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'request body must be valid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'request body must be a JSON object'))
+      }
+      const project_id = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      const session_id = typeof body.session_id === 'string' ? body.session_id.trim() : ''
+      if (!project_id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: project_id'))
+      if (!session_id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: session_id'))
+      const role = (body.role === undefined || body.role === null) ? 'primary' : String(body.role)
+      if (!LINK_ALLOWED_ROLES.includes(role)) {
+        return writeJson(res, 400, errorBody('INVALID_INPUT', 'role 只允许 ' + LINK_ALLOWED_ROLES.join('/')))
+      }
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'link-refused', kind: d.kind })
+          return writeJson(res, 409, {
+            ...errorBody('READONLY_DEGRADED', '域处于只读降级，拒绝关联：' + (d.title || d.kind)),
+            degradation: d,
+          })
+        }
+        // 负例闸：注册表里没有这个会话就拒绝，不许手工拼 id 造孤儿 link。
+        // 注册表本身读不到时（workspace.json 缺失）不拦，但把 registryChecked=false 记进证据与响应，
+        // 对账第 3 条随后会把真实孤儿标出来（external fail，不降级）。
+        let registryChecked = false
+        try {
+          const snap = await registry.snapshot()
+          if (snap.ok) {
+            registryChecked = true
+            if (!registry.existsFn(snap)(session_id)) {
+              await evidence({ phase: 'link-refused', reason: 'session-not-found', session_id })
+              return writeJson(res, 400, errorBody('SESSION_NOT_FOUND', '会话不在 DSH 注册表里：' + session_id + '（从候选列表里选，别手拼 id）'))
+            }
+          }
+        } catch { registryChecked = false }
+        const out = await s.linkSession({
+          project_id,
+          session_id,
+          role,
+          basis: body.basis,
+          confidence: body.confidence,
+          expected_rev: body.expected_rev,
+        })
+        // changed 是 store 挂上去的不可枚举标记：内容完全相同 → false（零副作用）。
+        const changed = out.changed === true
+        await evidence({ phase: 'link-served', changed, registryChecked })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, changed, registryChecked })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' ? 409
+          : code === 'PROJECT_NOT_FOUND' ? 404
+          : code === 'REV_CONFLICT' || code === 'EXPECTED_REV_REQUIRED' ? 409
+          : code === 'INTERNAL_ERROR' ? 500
+          : 400
+        await evidence({ phase: 'link-error', code, message })
         const extra = Array.isArray(error && error.issues) ? { issues: error.issues } : {}
         return writeJson(res, httpStatus, { ...errorBody(code, message), ...extra })
       }

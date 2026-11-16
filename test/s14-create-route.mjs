@@ -15,7 +15,7 @@
  */
 import { rm, mkdir, unlink, cp, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { apply, CREATE_PATH, READ_PATHS, STATE_PATH } from '../index.js'
+import { apply, CREATE_PATH, READ_PATHS, STATE_PATH, SESSIONS_PATH, LINK_PATH } from '../index.js'
 import { openStore } from '../core/store.mjs'
 import { snapshotTree, diffSnapshot, makePush, SID } from './_lib.mjs'
 
@@ -117,9 +117,9 @@ async function runHealthy() {
   apply(ctx, { root: GOOD, evidencePath: EVIDENCE })
 
   // ---- 1 注册契约 ----
-  const expected = [STATE_PATH, ...Object.values(READ_PATHS), CREATE_PATH]
-  push('A-1', '6 条路由全部注册（state + 4 只读 + create）',
-    expected.every((p) => routes.has(p)) && routes.size === 6,
+  const expected = [STATE_PATH, ...Object.values(READ_PATHS), CREATE_PATH, SESSIONS_PATH, LINK_PATH]
+  push('A-1', '8 条路由全部注册（state + 4 只读 + create + sessions + link）',
+    expected.every((p) => routes.has(p)) && routes.size === 8,
     'registered=' + [...routes.keys()].join(','))
   push('A-2', 'create 路由是 kind:exact', routes.get(CREATE_PATH)?.kind === 'exact',
     'kind=' + routes.get(CREATE_PATH)?.kind)

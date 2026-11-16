@@ -21,6 +21,9 @@ window.__ModuleLoader__.load({
     const API_OVERVIEW = 'api/project/overview'
     // 1.3 唯一写入口。方法必须是 POST；GET 会被后端 405。
     const API_CREATE = 'api/project/create'
+    // 1.4：会话候选（只读）+ 关联（第二个写入口）。
+    const API_SESSIONS = 'api/project/sessions'
+    const API_LINK = 'api/project/link'
 
     const C = {
       wrap: { padding: '16px 20px', maxWidth: '960px', fontFamily: 'inherit' },
@@ -56,6 +59,7 @@ window.__ModuleLoader__.load({
       err: { fontSize: '11px', padding: '4px 8px', borderRadius: '6px', marginBottom: '8px', background: 'rgba(217,48,37,0.08)', color: '#7a1710', wordBreak: 'break-all' },
       done: { fontSize: '11px', padding: '4px 8px', borderRadius: '6px', marginBottom: '8px', background: 'rgba(30,142,62,0.10)', color: '#0d652d', wordBreak: 'break-all' },
       hint: { fontSize: '11px', opacity: 0.7, marginTop: '6px' },
+      pickBtn: { marginTop: '4px', fontSize: '11px', padding: '2px 8px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.4)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
     }
 
     /**
@@ -119,6 +123,14 @@ window.__ModuleLoader__.load({
       const [formError, setFormError] = useState(null)
       const [formDone, setFormDone] = useState(null)
 
+      // 1.4 关联会话：同时只服务一个项目；候选来自后端 /api/project/sessions。
+      const [linkFor, setLinkFor] = useState(null)
+      const [linkQ, setLinkQ] = useState('')
+      const [linkData, setLinkData] = useState(null)
+      const [linkBusy, setLinkBusy] = useState(false)
+      const [linkErr, setLinkErr] = useState(null)
+      const [linkDone, setLinkDone] = useState(null)
+
       /**
        * 提交新建。三条铁律：
        *   1. 只在 writable 时发请求（按钮已 disabled，这里再挡一次，防止键盘回车绕过）；
@@ -157,6 +169,68 @@ window.__ModuleLoader__.load({
           setSubmitting(false)
         }
       }, [form, submitting, ovData, loadOverview])
+
+      /**
+       * 1.4：读会话候选。失败只写 linkErr，绝不触碰主面板 error（否则整块白屏）。
+       * 后端读不到注册表时返回 REGISTRY_UNAVAILABLE —— 照原话显示，不假装"没有会话"。
+       */
+      const loadSessions = useCallback(async (q) => {
+        setLinkBusy(true); setLinkErr(null)
+        try {
+          const res = await fetch(API_SESSIONS + '?limit=50&q=' + encodeURIComponent(q || ''), { cache: 'no-store' })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) { setLinkData(json) }
+          else {
+            setLinkData(null)
+            const er = json && json.error
+            setLinkErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setLinkData(null)
+          setLinkErr(String(e && e.message ? e.message : e))
+        } finally {
+          setLinkBusy(false)
+        }
+      }, [])
+
+      /** 打开某个项目的关联选择器（同时只开一个）。 */
+      const openLink = useCallback((p) => {
+        setLinkFor({ id: p.id, name: p.name || p.id })
+        setLinkQ(''); setLinkData(null); setLinkErr(null); setLinkDone(null)
+        loadSessions('')
+      }, [loadSessions])
+
+      /**
+       * 1.4：关联。重复点同一条 → 后端 changed=false（真幂等：rev 不涨、changelog 不增、基线不动）。
+       * 界面必须把这个区别显示出来，否则使用者会以为"点了两次 = 建了两条"。
+       */
+      const submitLink = useCallback(async (sessionId) => {
+        if (!linkFor || linkBusy) return
+        setLinkBusy(true); setLinkErr(null); setLinkDone(null)
+        try {
+          const res = await fetch(API_LINK, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ project_id: linkFor.id, session_id: sessionId, basis: '界面手动关联' }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setLinkDone(json.changed
+              ? ('已关联：' + sessionId)
+              : ('已经关联过了，零副作用（rev / changelog / 基线都没动）：' + sessionId))
+            await loadOverview()
+          } else {
+            const er = json && json.error
+            setLinkErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setLinkErr(String(e && e.message ? e.message : e))
+        } finally {
+          setLinkBusy(false)
+        }
+      }, [linkFor, linkBusy, loadOverview])
 
       useEffect(() => {
         let alive = true
@@ -248,6 +322,14 @@ window.__ModuleLoader__.load({
               h('div', { style: C.projName }, p.name || '(未命名)'),
               h('div', { style: C.projMeta }, '目标：' + (p.objective || '—')),
               h('div', { style: C.projMeta }, '下一步：' + (p.next_action || '—')),
+              h('button', {
+                type: 'button',
+                style: readOnly ? Object.assign({}, C.pickBtn, C.submitOff) : C.pickBtn,
+                disabled: readOnly,
+                'data-action': 'open-link',
+                'data-for': p.id,
+                onClick: () => openLink(p),
+              }, '关联会话'),
             ))
           }
         }
@@ -311,11 +393,62 @@ window.__ModuleLoader__.load({
         h('div', { style: C.hint }, '写入口只有一个：POST ' + API_CREATE + '。降级时后端返回 409 并拒绝写入。'),
       )
 
+      /**
+       * 1.4 关联会话选择器。四态与新建表单一致：未开 / 读取中 / 有候选 / 出错。
+       * 候选行的标题来自会话缓存，缓存里没有就显示 session id —— 不编造标题。
+       */
+      const linkPicker = linkFor ? h('div', { style: C.form, 'data-link-form': '1', 'data-link-project': linkFor.id },
+        h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
+        linkErr ? h('div', { style: C.err, role: 'alert', 'data-link-error': '1' }, '关联失败：' + linkErr) : null,
+        linkDone ? h('div', { style: C.done, 'data-link-done': '1' }, linkDone) : null,
+        h('label', { style: C.field },
+          h('span', { style: C.label }, '搜索会话（匹配 session id / 工作区标题 / 工作区路径）'),
+          h('input', {
+            type: 'text',
+            style: C.input,
+            value: linkQ,
+            placeholder: '留空列出前 50 条',
+            'data-field': 'link-q',
+            onChange: (e) => {
+              const v = e && e.target ? e.target.value : ''
+              setLinkQ(v)
+              loadSessions(v)
+            },
+          }),
+        ),
+        linkData
+          ? h('div', null,
+              h('div', { style: C.muted }, '匹配 ' + linkData.matched + ' 条 / 注册表共 ' + linkData.total + ' 条，显示前 ' + linkData.sessions.length + ' 条'),
+              linkData.sessions.length === 0
+                ? h('div', { style: C.empty }, '没有匹配的会话')
+                : linkData.sessions.map((s) => h('div', { key: 's' + s.session_id, style: C.proj, 'data-session-id': s.session_id },
+                    h('div', { style: C.projName }, s.title || (s.session_id.slice(0, 16) + '…')),
+                    h('div', { style: C.projMeta }, (s.workspace_title || '(未知工作区)') + ' · ' + s.session_id),
+                    h('button', {
+                      type: 'button',
+                      style: C.pickBtn,
+                      disabled: linkBusy,
+                      'data-action': 'link-session',
+                      'data-session': s.session_id,
+                      onClick: () => submitLink(s.session_id),
+                    }, '关联'),
+                  )),
+            )
+          : h('div', { style: C.empty }, linkBusy ? '读取会话列表…' : '（还没有候选）'),
+        h('div', { style: C.hint }, '关联是幂等的：同一条重复点，rev / changelog / 基线都不会动。会话必须先在 DSH 注册表里存在。'),
+        h('button', {
+          type: 'button',
+          style: C.btn,
+          onClick: () => { setLinkFor(null); setLinkData(null); setLinkErr(null); setLinkDone(null) },
+        }, '收起'),
+      ) : null
+
       return h('div', { style: C.wrap, 'data-project-lite': 'panel', 'data-meta-state': data.metaState },
         h('h2', { style: C.h2 }, '项目'),
         banner,
         status,
         projectList,
+        linkPicker,
         createForm,
         h('button', { style: C.btn, onClick: () => load(true), disabled: busy }, busy ? '刷新中…' : '刷新'),
       )

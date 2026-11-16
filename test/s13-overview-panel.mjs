@@ -185,7 +185,7 @@ push('C2', flat.text.some((t) => t.includes('通过')), '3 次主轮询后对账
 // --- 静态边界：不新增 slot、不写 ---
 push('D1', (src.match(/slots\.inject\(/g) || []).length === 2, '仍只注入 2 个 slot（main + sidebar.panellist）')
 // 1.3 起源码里**有**一个写入口（新建项目）。边界改成：写路径只能有一条，且只能是 POST api/project/create。
-push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 1 && !/删除项目|归档项目|deleteProject|archiveProject/.test(src), '只有一个 POST 写入口，且无删除/归档按钮')
+push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 2 && !/删除项目|归档项目|deleteProject|archiveProject/.test(src), '两个 POST 写入口（create + link），且无删除/归档按钮')
 push('D3', src.includes("const API_OVERVIEW = 'api/project/overview'"), 'overview 走只读 GET 相对路径')
 push('D4', src.includes('const [ovData, setOvData]') && src.includes('const [ovError, setOvError]'), 'overview 用独立 state')
 

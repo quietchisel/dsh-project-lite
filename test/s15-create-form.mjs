@@ -204,7 +204,7 @@ push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '�
 
 // --- 静态边界 ---
 push('E18', (src.match(/slots\.inject\(/g) || []).length === 2, '仍然只注入 2 个 slot')
-push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 1, '源码里只有一处 POST')
+push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 2, '源码里两处 POST（create + link），无第三处')
 push('E20', src.includes("const API_CREATE = 'api/project/create'"), '写路径常量就是 api/project/create')
 
 const pass = steps.filter((s) => s.ok).length
