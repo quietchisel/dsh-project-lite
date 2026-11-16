@@ -378,15 +378,18 @@ export function apply(ctx, config = {}) {
         // 负例闸：注册表里没有这个会话就拒绝，不许手工拼 id 造孤儿 link。
         // 注册表本身读不到时（workspace.json 缺失）不拦，但把 registryChecked=false 记进证据与响应，
         // 对账第 3 条随后会把真实孤儿标出来（external fail，不降级）。
+        // 1.10 fail-closed 三校验：会话在不在、工作区还在不在列表里、工作区目录还在不在。
+        // 任一不过 → 400 + 人话原因，零落盘。注册表本身读不到时放行但记 registryChecked=false。
         let registryChecked = false
         try {
-          const snap = await registry.snapshot()
-          if (snap.ok) {
+          const v = await registry.verify(session_id)
+          if (v.ok) {
             registryChecked = true
-            if (!registry.existsFn(snap)(session_id)) {
-              await evidence({ phase: 'link-refused', reason: 'session-not-found', session_id })
-              return writeJson(res, 400, errorBody('SESSION_NOT_FOUND', '会话不在 DSH 注册表里：' + session_id + '（从候选列表里选，别手拼 id）'))
-            }
+          } else if (v.code === 'REGISTRY_UNAVAILABLE') {
+            registryChecked = false
+          } else {
+            await evidence({ phase: 'link-refused', reason: v.code, session_id })
+            return writeJson(res, 400, errorBody(v.code, v.reason))
           }
         } catch { registryChecked = false }
         const actKey = JSON.stringify({

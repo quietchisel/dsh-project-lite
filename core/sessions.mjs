@@ -63,7 +63,13 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
         })
       }
     }
-    return byId
+    const rawIds = doc?.global?.workspaceIds
+    return {
+      byId,
+      workspaceIds: new Set(Array.isArray(rawIds) ? rawIds : []),
+      // 区分"字段缺失"（未知，不强制）与"字段是空数组"（明确没有任何工作区，必须拦）。
+      workspaceIdsKnown: Array.isArray(rawIds),
+    }
   }
 
   /**
@@ -79,14 +85,14 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
       snap = { at: now, mtimeMs: null, ids: new Set(), byId: new Map(), total: 0, ok: false, reason: 'workspace.json 不存在：' + workspaceFile }
       return snap
     }
-    let byId
+    let parsed
     try {
-      byId = parseWorkspace(await readFile(workspaceFile, 'utf8'))
+      parsed = parseWorkspace(await readFile(workspaceFile, 'utf8'))
     } catch (error) {
-      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
+      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), workspaceIds: new Set(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
       return snap
     }
-    snap = { at: now, mtimeMs, ids: new Set(byId.keys()), byId, total: byId.size, ok: true, reason: null }
+    snap = { at: now, mtimeMs, ids: new Set(parsed.byId.keys()), byId: parsed.byId, workspaceIds: parsed.workspaceIds, workspaceIdsKnown: parsed.workspaceIdsKnown, total: parsed.byId.size, ok: true, reason: null }
     return snap
   }
 
@@ -161,11 +167,39 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     }
   }
 
+  /**
+   * 1.10 fail-closed 三校验（关联前必过，任一不过就零落盘）：
+   *   1. 会话在注册表里；
+   *   2. 会话所属工作区还在工作区列表里（没被移出）；
+   *   3. 工作区目录在磁盘上真实存在。
+   *
+   * 为什么第 2、3 条要查：会话还在、但它所在的工作区文件夹被删了，关联进来的就是一条
+   * "指向空气"的引用——事后看详情只会显示一个路径，点过去什么都没有。
+   * 宁可现在拒，也不要留一条假引用。
+   */
+  async function verify(sessionId) {
+    const s = await snapshot()
+    if (!s.ok) return { ok: false, code: 'REGISTRY_UNAVAILABLE', reason: s.reason || '读不到 DSH 会话注册表' }
+    const id = String(sessionId || '')
+    const row = s.byId.get(id)
+    if (!row) return { ok: false, code: 'SESSION_NOT_FOUND', reason: '会话不在 DSH 注册表里：' + id }
+    if (s.workspaceIdsKnown && !s.workspaceIds.has(row.workspace_id)) {
+      return { ok: false, code: 'WORKSPACE_GONE', reason: '会话所属工作区已不在工作区列表里：' + row.workspace_id }
+    }
+    if (!row.workspace_path) {
+      return { ok: false, code: 'WORKSPACE_PATH_MISSING', reason: '会话所属工作区没有记录路径，无法确认它落在哪' }
+    }
+    try { await stat(row.workspace_path) } catch {
+      return { ok: false, code: 'WORKSPACE_PATH_MISSING', reason: '会话所属工作区目录不存在：' + row.workspace_path }
+    }
+    return { ok: true, session_id: id, workspace_id: row.workspace_id, workspace_path: row.workspace_path }
+  }
+
   /** 存在性：同步判定，给 reconcile 用（先 await snapshot() 再取这个闭包）。 */
   function existsFn(s) {
     const ids = s && s.ids ? s.ids : new Set()
     return (sessionId) => ids.has(String(sessionId || ''))
   }
 
-  return { snapshot, list, titleOf, titlesOf, existsFn, paths: { workspaceFile, cacheDir } }
+  return { snapshot, list, titleOf, titlesOf, existsFn, verify, paths: { workspaceFile, cacheDir } }
 }

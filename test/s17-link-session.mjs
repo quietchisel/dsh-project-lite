@@ -40,7 +40,7 @@ function workspaceDoc(sessionIds) {
     tables: {
       workspaces: {
         [WS_ID]: {
-          path: 'D:\\夹具工作区',
+          path: BASE,
           title: '夹具工作区甲',
           sessionIds,
           createdAt: '2026-11-01T00:00:00.000Z',

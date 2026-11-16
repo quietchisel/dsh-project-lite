@@ -31,7 +31,7 @@ const WS = 'ws-aaaaaaaa-0000-0000-0000-000000000001'
 await writeFile(join(ROOT, 'workspace.json'), JSON.stringify({
   unit: { name: 'workspace', version: 2 },
   global: { initialized: true, defaultWorkspaceId: WS, workspaceIds: [WS], archivedSessionIds: [], pinnedSessionIds: [] },
-  tables: { workspaces: { [WS]: { path: 'D:\\w', title: 'W', sessionIds: [SID], createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' } } },
+  tables: { workspaces: { [WS]: { path: BASE, title: 'W', sessionIds: [SID], createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' } } },
 }), 'utf8')
 
 function makeCtx() {
