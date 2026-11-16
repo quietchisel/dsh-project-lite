@@ -1,6 +1,6 @@
 {
   "name": "dsh-project-lite",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "private": true,
   "type": "module",
   "description": "DSH 轻量项目面板：完整性闸 + 降级即只读，项目数据对不上就拒绝写入并说明原因",

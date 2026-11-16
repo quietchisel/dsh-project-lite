@@ -460,7 +460,9 @@ window.__ModuleLoader__.load({
                   style: { background: 'transparent', border: 'none', padding: 0, font: 'inherit', fontWeight: 600, color: 'inherit', cursor: 'pointer', textAlign: 'left' },
                   'data-action': 'open-detail',
                   'data-for': p.id,
-                  onClick: () => openDetail(p),
+                  // toggle：当前详情就是它 → 收起（2026-11-16 使用者反馈：再点一次要能收起）。
+                  // 点别的项目仍走 openDetail（同一时刻只展开一个）。
+                  onClick: () => { if (detail && detail.id === p.id) setDetail(null); else openDetail(p) },
                 }, p.name || '(未命名)'),
                 p.confidence === 'inferred'
                   ? h('span', {
@@ -552,7 +554,8 @@ window.__ModuleLoader__.load({
        */
       const linkPicker = linkFor ? h('div', { style: C.picker, 'data-link-form': '1', 'data-link-project': linkFor.id },
         // 「收起」必须固定在标题行：放到滚动区底部时，候选一多就滚出视野，收不起来（2026-11-16 反馈）。
-        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', marginBottom: '8px' } },
+        // 标题行 sticky：滚候选列表时「收起」按钮固定在选择器顶部，不用滚回最上面（2026-11-16 反馈）。
+        h('div', { style: { position: 'sticky', top: 0, zIndex: 2, background: 'Canvas', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', padding: '2px 0', marginBottom: '8px' } },
           h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
           h('button', {
             type: 'button',

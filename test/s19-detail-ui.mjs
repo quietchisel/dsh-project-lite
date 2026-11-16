@@ -124,6 +124,20 @@ await flush()
 tree = render()
 let flat = flatten(tree)
 
+// toggle 语义后：再点同一个项目 = 收起。所以切换 detailMode 前必须显式收起，再重新打开。
+const reopenDetail = async (mode) => {
+  tree = render()
+  if (findAll(tree, (n) => n.props && n.props['data-detail'] === '1').length) {
+    byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+    await flush()
+  }
+  detailMode = mode
+  tree = render()
+  byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+  await flush()
+  tree = render()
+}
+
 push('T1', flat.sections.length === 0 && !flat.attrs['data-detail'], '未点开时没有详情块')
 const btn = byAttr(tree, 'data-action', 'open-detail')[0]
 push('T2', !!btn && btn.props['data-for'] === 'prj_A', '项目名是可点入口（data-for=prj_A）')
@@ -143,24 +157,27 @@ push('T9', flat.text.some((x) => x.includes('还没有登记工作区')), '工�
 push('T10', flat.text.some((x) => x.includes('还没有交付物')), '交付物空态有文案')
 push('T11', flat.text.some((x) => x.includes('推断依据')), '依据区把 basis 显示出来')
 
-detailMode = 'missing'
+// --- toggle：再点同一个项目标题 → 收起；第三次点 → 重新展开 ---
 byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
 await flush()
 tree = render(); flat = flatten(tree)
+push('T27', !flat.attrs['data-detail'], '再点当前已展开的项目标题 → 详情收起')
+byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+await flush()
+tree = render(); flat = flatten(tree)
+push('T28', flat.attrs['data-detail-state'] === 'ready', '第三次点 → 重新展开（toggle 双向可用）')
+
+await reopenDetail('missing')
+flat = flatten(tree)
 push('T12', flat.attrs['data-detail-state'] === 'missing' && flat.text.some((x) => x.includes('已经不在了')), 'found:false → missing 态且有一句话')
 
-detailMode = 'fail'
-byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
-await flush()
-tree = render(); flat = flatten(tree)
+await reopenDetail('fail')
+flat = flatten(tree)
 push('T13', flat.attrs['data-detail-state'] === 'error' && flat.text.some((x) => x.includes('详情读取失败')), '读取失败 → error 态')
 push('T14', flat.attrs['data-project-lite'] === 'panel' && flat.text.includes('项目'), '失败时主面板不白屏')
 
 // --- 响应式（2026-11-16 全屏反馈：右边全空 + 详情看不到下半截）---
-detailMode = 'ok'
-byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
-await flush()
-tree = render()
+await reopenDetail('ok')
 const dn = findAll(tree, (n) => n.props && n.props['data-detail'] === '1')[0]
 push('T15', !!dn && String(dn.props.style.overflowY) === 'auto' && String(dn.props.style.maxHeight).length > 0, '详情块自身可滚动（overflowY=auto + maxHeight）')
 push('T16', !!dn && String(dn.props.style.gridTemplateColumns).includes('auto-fit'), '宽屏自动多列（grid auto-fit），窄窗回落 1 列')
@@ -186,10 +203,7 @@ tree = render()
 push('T23', !findAll(tree, (n) => n.props && n.props['data-basis-overlay'] === '1').length, '关闭后浮层消失')
 
 // --- 归档：按钮 → 二次确认 → POST → 详情刷新 ---
-tree = render()
-byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
-await flush()
-tree = render()
+await reopenDetail('ok')
 const askBtn = byAttr(tree, 'data-action', 'ask-archive')[0]
 push('T24', !!askBtn, '详情页有「归档」按钮（未归档项目）')
 askBtn.props.onClick()
@@ -210,6 +224,8 @@ await flush()
 tree = render()
 const pick = findAll(tree, (n) => n.props && n.props['data-link-form'] === '1')[0]
 push('T18', !!pick && String(pick.props.style.overflowY) === 'auto' && String(pick.props.style.maxHeight).length > 0, '关联会话选择器自身可滚动（overflowY=auto + maxHeight）')
+const pickHead = pick && pick.children && pick.children[0]
+push('T29', !!pickHead && String(pickHead.props.style && pickHead.props.style.position) === 'sticky' && String(pickHead.props.style && pickHead.props.style.top) === '0', '关联会话标题行 sticky（top=0），滚候选时收起按钮固定可见')
 
 
 const pass = steps.filter((s) => s.ok).length
