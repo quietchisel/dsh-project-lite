@@ -75,6 +75,7 @@ function fakeFetch(url, init) {
   const u = String(url)
   if (u.includes('api/project/state')) payload = STATE
   else if (u.includes('api/project/overview')) payload = OVERVIEW
+  else if (u.includes('api/project/archive')) payload = { ok: true, project: { ...DETAIL_OK.project, status: 'archived' }, replayed: false }
   else if (u.includes('api/project/sessions')) payload = { ok: true, total: 0, matched: 0, limit: 50, sessions: [] }
   else if (u.includes('api/project/get')) {
     if (detailMode === 'missing') payload = { ok: true, found: false, project: null, sessions: [], workspaces: [], deliverables: [], logs: [], counts: { sessions: 0, workspaces: 0, deliverables: 0, logs: 0, unconfirmed: 0 }, unconfirmed: [], degradation: { degraded: false } }
@@ -182,6 +183,22 @@ closeB && closeB.props.onClick()
 await flush()
 tree = render()
 push('T23', !findAll(tree, (n) => n.props && n.props['data-basis-overlay'] === '1').length, '关闭后浮层消失')
+
+// --- 归档：按钮 → 二次确认 → POST → 详情刷新 ---
+tree = render()
+byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+await flush()
+tree = render()
+const askBtn = byAttr(tree, 'data-action', 'ask-archive')[0]
+push('T24', !!askBtn, '详情页有「归档」按钮（未归档项目）')
+askBtn.props.onClick()
+await flush()
+tree = render()
+push('T25', !!byAttr(tree, 'data-archive-confirm', '1').length, '点归档先出二次确认，不直接发请求')
+const postsBeforeArch = calls.filter(c => c.url.includes('archive')).length
+byAttr(tree, 'data-action', 'confirm-archive')[0].props.onClick()
+await flush()
+push('T26', calls.filter(c => c.url.includes('archive') && c.method === 'POST').length === postsBeforeArch + 1, '点确认才发 POST archive')
 
 // --- 关联会话选择器也要能滚（50 条候选会撑爆面板）---
 byAttr(tree, 'data-action', 'open-link')[0].props.onClick()

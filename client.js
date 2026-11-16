@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     const API_GET = 'api/project/get'
     const API_SESSIONS = 'api/project/sessions'
     const API_LINK = 'api/project/link'
+    const API_ARCHIVE = 'api/project/archive'
 
     /**
      * 1.8：一次"用户意图"一个 requestId。
@@ -186,6 +187,9 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = useState(null)
       // 列表行「未确认」徽标点开的依据浮层（只服务一条项目）。
       const [basisFor, setBasisFor] = useState(null)
+      // 归档二次确认：存 {id, name, rev}，用户点确认才真发请求。
+      const [archiveAsk, setArchiveAsk] = useState(null)
+      const [archiveErr, setArchiveErr] = useState(null)
 
       /**
        * 提交新建。三条铁律：
@@ -270,6 +274,32 @@ window.__ModuleLoader__.load({
           setDetail({ id: p.id, data: null, err: String(e && e.message ? e.message : e) })
         }
       }, [])
+
+      /** 归档：先本地确认，再 POST；成功后立刻刷新详情与列表。 */
+      const submitArchive = useCallback(async (ask) => {
+        if (!ask) return
+        setArchiveErr(null)
+        try {
+          const res = await fetch(API_ARCHIVE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: ask.id, expected_rev: ask.rev, requestId: newRequestId() }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setArchiveAsk(null)
+            await loadOverview()
+            // 重新拉详情，让归档后的 status 立刻可见。
+            await openDetail({ id: ask.id })
+          } else {
+            const er = json && json.error
+            setArchiveErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setArchiveErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, openDetail])
 
       /** 打开某个项目的关联选择器（同时只开一个）。 */
       const openLink = useCallback((p) => {
@@ -597,7 +627,23 @@ window.__ModuleLoader__.load({
           h('div', { style: C.groupHead }, title + ' · ' + count),
           count === 0 ? h('div', { style: C.empty }, emptyText) : body)
         return h('div', { style: C.detail, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
-          h('div', { style: Object.assign({}, C.formTitle, C.detailFull) }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
+          h('div', { style: Object.assign({}, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }, C.detailFull) },
+            h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
+            p.status !== 'archived'
+              ? h('button', {
+                  type: 'button', style: C.pickBtn,
+                  'data-action': 'ask-archive', 'data-for': p.id,
+                  onClick: () => { setArchiveErr(null); setArchiveAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                }, '归档')
+              : h('span', { style: C.tag }, '已归档'),
+          ),
+          archiveAsk && archiveAsk.id === p.id
+            ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-archive-confirm': '1' },
+                '确认归档「' + archiveAsk.name + '」？归档不删数据，可在 archived 组查看。',
+                archiveErr ? h('div', { style: C.err }, '归档失败：' + archiveErr) : null,
+                h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-archive', onClick: () => submitArchive(archiveAsk) }, '确认归档'),
+                h('button', { type: 'button', style: C.pickBtn, onClick: () => setArchiveAsk(null) }, '取消'))
+            : null,
           sec('project', '1 · 项目', 1, h('div', null,
             line('目标', p.objective),
             line('下一步', p.next_action),

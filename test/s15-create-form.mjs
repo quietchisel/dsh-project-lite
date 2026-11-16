@@ -207,9 +207,10 @@ push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '�
 
 // --- 静态边界 ---
 push('E18', (src.match(/slots\.inject\(/g) || []).length === 3, '注入 3 个 slot（main + sidebar.panellist + shell.overlay）')
-push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 3
-  && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'"),
-  '三处 POST 调用点，端点只有 create 与 link 两个')
+push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 4
+  && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
+  && src.includes("API_ARCHIVE = 'api/project/archive'"),
+  '四处 POST 调用点，端点 create / link / archive 三个')
 push('E20', src.includes("const API_CREATE = 'api/project/create'"), '写路径常量就是 api/project/create')
 
 const pass = steps.filter((s) => s.ok).length

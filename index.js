@@ -45,6 +45,8 @@ export const CREATE_PATH = '/api/project/create'
 export const SESSIONS_PATH = '/api/project/sessions'
 /** 1.4：第二个写入口——把会话挂到项目上（复用 store.linkSession 的真幂等）。 */
 export const LINK_PATH = '/api/project/link'
+/** 归档（只改 status，不删数据；恢复是后续功能）。 */
+export const ARCHIVE_PATH = '/api/project/archive'
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -421,6 +423,61 @@ export function apply(ctx, config = {}) {
         await evidence({ phase: 'link-error', code, message })
         const extra = Array.isArray(error && error.issues) ? { issues: error.issues } : {}
         return writeJson(res, httpStatus, { ...errorBody(code, message), ...extra })
+      }
+    },
+  }))
+
+  // ---- 归档：第三个写入口，复用 core 里早就有的 archiveProject ----
+  // 二层防误操作：expected_rev（防并发覆盖）+ requestId 幂等（防重复提交）。
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: ARCHIVE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + ARCHIVE_PATH))
+      }
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) {
+        return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      }
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'body must be a JSON object'))
+      }
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: id'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'archive-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝归档：' + (d.title || d.kind)), degradation: d })
+        }
+        const cur = s.project(id)
+        if (!cur) {
+          return writeJson(res, 404, errorBody('PROJECT_NOT_FOUND', '项目不存在：' + id))
+        }
+        if (cur.status === 'archived') {
+          // 已经归档：零副作用返回，不报错也不再写一条 changelog。
+          return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: cur, replayed: true, already_archived: true })
+        }
+        const actKey = JSON.stringify({ op: 'archive', id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.archiveProject(id, { expected_rev: body.expected_rev }))
+        const out = claimed.value
+        await evidence({ phase: 'archive-served', id, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out, replayed: claimed.replayed, already_archived: false })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'PROJECT_NOT_FOUND' ? 404
+          : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'archive-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
       }
     },
   }))
