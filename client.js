@@ -27,7 +27,9 @@ window.__ModuleLoader__.load({
     const API_LINK = 'api/project/link'
 
     const C = {
-      wrap: { padding: '16px 20px', maxWidth: '960px', fontFamily: 'inherit' },
+      // 2026-11-16 使用者反馈：全屏时右边一片空白（原来写死 maxWidth 960px，只在小窗合适）。
+      // 改成随窗口流式：宽度撑满、按内容自适应，不再固定上限。
+      wrap: { padding: '16px 20px', width: '100%', maxWidth: 'none', boxSizing: 'border-box', fontFamily: 'inherit' },
       h2: { fontSize: '15px', fontWeight: 600, margin: '0 0 10px' },
       red: { border: '1px solid #d93025', background: '#fdecea', color: '#7a1710', borderRadius: '8px', padding: '10px 12px', marginBottom: '12px' },
       redTitle: { fontWeight: 600, fontSize: '13px', marginBottom: '4px' },
@@ -62,6 +64,15 @@ window.__ModuleLoader__.load({
       hint: { fontSize: '11px', opacity: 0.7, marginTop: '6px' },
       pickBtn: { marginTop: '4px', fontSize: '11px', padding: '2px 8px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.4)', background: 'transparent', color: 'inherit', cursor: 'pointer' },
       // 用 CSS 系统色（Canvas / CanvasText），跟随主题，不写死明暗。
+      // 详情六分区：窄窗 1 列、宽窗自动多列（auto-fit），并给自身滚动条——
+      // 之前全屏展开后下半截看不到，也没有滚动条（2026-11-16 反馈）。
+      detail: {
+        border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px', marginTop: '12px',
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+        columnGap: '20px', rowGap: '2px',
+        maxHeight: '62vh', overflowY: 'auto', boxSizing: 'border-box',
+      },
+      detailFull: { gridColumn: '1 / -1' },
       overlayMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.38)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 },
       overlayBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '10px', padding: '14px 16px', minWidth: '340px', maxWidth: '520px', maxHeight: '70vh', overflow: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.28)' },
     }
@@ -527,8 +538,8 @@ window.__ModuleLoader__.load({
         const sec = (key, title, count, body, emptyText) => h('div', { 'data-section': key },
           h('div', { style: C.groupHead }, title + ' · ' + count),
           count === 0 ? h('div', { style: C.empty }, emptyText) : body)
-        return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
-          h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
+        return h('div', { style: C.detail, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
+          h('div', { style: Object.assign({}, C.formTitle, C.detailFull) }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
           sec('project', '1 · 项目', 1, h('div', null,
             line('目标', p.objective),
             line('下一步', p.next_action),
@@ -541,7 +552,8 @@ window.__ModuleLoader__.load({
           sec('deliverables', '4 · 交付物', deliverables.length, deliverables, '还没有交付物。这一版只读，注册入口在后续版本。'),
           sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
-          h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情'),
+          h('div', { style: C.detailFull },
+            h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情')),
         )
       })() : null
 

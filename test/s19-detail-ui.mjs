@@ -153,6 +153,18 @@ tree = render(); flat = flatten(tree)
 push('T13', flat.attrs['data-detail-state'] === 'error' && flat.text.some((x) => x.includes('详情读取失败')), '读取失败 → error 态')
 push('T14', flat.attrs['data-project-lite'] === 'panel' && flat.text.includes('项目'), '失败时主面板不白屏')
 
+// --- 响应式（2026-11-16 全屏反馈：右边全空 + 详情看不到下半截）---
+detailMode = 'ok'
+byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+await flush()
+tree = render()
+const dn = findAll(tree, (n) => n.props && n.props['data-detail'] === '1')[0]
+push('T15', !!dn && String(dn.props.style.overflowY) === 'auto' && String(dn.props.style.maxHeight).length > 0, '详情块自身可滚动（overflowY=auto + maxHeight）')
+push('T16', !!dn && String(dn.props.style.gridTemplateColumns).includes('auto-fit'), '宽屏自动多列（grid auto-fit），窄窗回落 1 列')
+const wrapNode = findAll(tree, (n) => n.props && n.props['data-project-lite'] === 'panel')[0]
+push('T17', !!wrapNode && String(wrapNode.props.style.maxWidth) === 'none' && String(wrapNode.props.style.width) === '100%', '外层容器随窗口流式（maxWidth=none / width=100%）')
+
+
 const pass = steps.filter((s) => s.ok).length
 const summary = { at: new Date().toISOString(), suite: 's19-detail-ui', total: steps.length, pass, fail: steps.length - pass, verdict: pass === steps.length ? 'PASS' : 'FAIL', steps }
 await writeFile(OUT, JSON.stringify(summary, null, 2), 'utf8')
