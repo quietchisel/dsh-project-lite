@@ -31,6 +31,11 @@ function projectSummary(p) {
     status: p.status,
     confidence: p.confidence,
     basis: p.basis,
+    // 详情页「项目区」要显示完成判据与标签；徽标要能点开看到历史来源。
+    done_when: p.done_when ?? null,
+    tags: p.tags ?? [],
+    legacy_id: p.legacy_id ?? null,
+    legacy_refs: p.legacy_refs ?? [],
     created_at: p.created_at,
     updated_at: p.updated_at,
     rev: p.rev,
@@ -97,11 +102,33 @@ export function createReadService(store) {
     const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id)
     const deliverables = tableAll(store, 'deliverable').filter((d) => d.project_id === id)
     const keys = new Set([id, ...links.map((l) => l.id)])
-    const logs = store.logs().filter((l) => keys.has(l.target_key))
+    // changelog 倒序 + 上限 100：详情页只用来"看最近发生了什么"，不做全量导出。
+    const logs = store.logs()
+      .filter((l) => keys.has(l.target_key))
+      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+      .slice(0, 100)
+    /**
+     * 「未确认」清单：confidence === 'inferred' 的项目 / 会话 / 工作区 / 交付物。
+     * 徽标与依据浮层只读这一个数组，不在前端各自判断一遍——两处判断一定会漂移。
+     */
+    const unconfirmed = []
+    const project = projectSummary(p)
+    if (project.confidence === 'inferred') unconfirmed.push({ kind: 'project', id: project.id, basis: project.basis })
+    for (const l of links) if (l.confidence === 'inferred') unconfirmed.push({ kind: 'session', id: l.id, session_id: l.session_id, basis: l.basis })
+    for (const w of workspaces) if (w.confidence === 'inferred') unconfirmed.push({ kind: 'workspace', id: w.id, workspace_id: w.workspace_id, basis: w.basis })
+    for (const d of deliverables) if (d.confidence === 'inferred') unconfirmed.push({ kind: 'deliverable', id: d.id, title: d.title, basis: d.basis })
     return snapshot({
       ok: true, found: true,
-      project: projectSummary(p),
+      project,
       sessions: links, workspaces, deliverables, logs,
+      counts: {
+        sessions: links.length,
+        workspaces: workspaces.length,
+        deliverables: deliverables.length,
+        logs: logs.length,
+        unconfirmed: unconfirmed.length,
+      },
+      unconfirmed,
       ...common(),
     })
   }

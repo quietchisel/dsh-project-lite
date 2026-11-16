@@ -244,7 +244,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   Object.assign(store, {
     meta,
     /** 建项目：被引用者先写（project → link → changelog），符合顺序协议 §8.3。 */
-    async createProject({ name, objective, next_action, done_when, kind = 'project', status = 'active', session_id, basis, confidence = 'confirmed', legacy_refs }) {
+    async createProject({ name, objective, next_action, done_when, tags, kind = 'project', status = 'active', session_id, basis, confidence = 'confirmed', legacy_refs }) {
       assertWritable()
       const na = validateNextAction(next_action)
       if (!na.ok) throw new StoreError(na.code, 'next_action 不合格：' + na.reason, { reason: na.reason })
@@ -258,6 +258,9 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       }
       const dw = normalizeDoneWhen(done_when)
       if (dw) record.done_when = dw
+      // tags 在 schema 里是 string[]（最多 3 个）；归一化后交给 assertRecord 把关。
+      const tg = normalizeDoneWhen(tags)
+      if (tg) record.tags = tg.slice(0, 3)
       if (legacy_refs) record.legacy_refs = legacy_refs
       assertRecord('project', record)
       await domain.table('project').put(id, record)

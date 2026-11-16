@@ -272,6 +272,7 @@ export function apply(ctx, config = {}) {
           objective: body.objective,
           next_action: body.next_action,
           done_when: body.done_when,
+          tags: body.tags,
           session_id: body.session_id,
           basis: body.basis,
           confidence: body.confidence,

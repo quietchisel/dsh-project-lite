@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
     // 1.3 唯一写入口。方法必须是 POST；GET 会被后端 405。
     const API_CREATE = 'api/project/create'
     // 1.4：会话候选（只读）+ 关联（第二个写入口）。
+    const API_GET = 'api/project/get'
     const API_SESSIONS = 'api/project/sessions'
     const API_LINK = 'api/project/link'
 
@@ -149,6 +150,9 @@ window.__ModuleLoader__.load({
       const [linkErr, setLinkErr] = useState(null)
       const [linkDone, setLinkDone] = useState(null)
 
+      // 详情页（六分区）：只服务一个项目，同时只开一个。
+      const [detail, setDetail] = useState(null)
+
       /**
        * 提交新建。三条铁律：
        *   1. 只在 writable 时发请求（按钮已 disabled，这里再挡一次，防止键盘回车绕过）；
@@ -209,6 +213,23 @@ window.__ModuleLoader__.load({
           setLinkErr(String(e && e.message ? e.message : e))
         } finally {
           setLinkBusy(false)
+        }
+      }, [])
+
+      /** 打开项目详情（六分区）。失败只写 detail.err，不动主面板。 */
+      const openDetail = useCallback(async (p) => {
+        setDetail({ id: p.id, data: null, err: null })
+        try {
+          const res = await fetch(API_GET + '?id=' + encodeURIComponent(p.id), { cache: 'no-store' })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) setDetail({ id: p.id, data: json, err: null })
+          else {
+            const er = json && json.error
+            setDetail({ id: p.id, data: null, err: (er && (er.message || er.code)) || ('HTTP ' + res.status) })
+          }
+        } catch (e) {
+          setDetail({ id: p.id, data: null, err: String(e && e.message ? e.message : e) })
         }
       }, [])
 
@@ -337,7 +358,14 @@ window.__ModuleLoader__.load({
           rows.push(h('div', { key: 'g' + g.key, style: C.groupHead }, (g.key || '?') + ' · ' + items.length))
           for (const p of items) {
             rows.push(h('div', { key: 'p' + p.id, style: C.proj, 'data-project-id': p.id },
-              h('div', { style: C.projName }, p.name || '(未命名)'),
+              h('div', { style: C.projName },
+                h('button', {
+                  type: 'button',
+                  style: { background: 'transparent', border: 'none', padding: 0, font: 'inherit', fontWeight: 600, color: 'inherit', cursor: 'pointer', textAlign: 'left' },
+                  'data-action': 'open-detail',
+                  'data-for': p.id,
+                  onClick: () => openDetail(p),
+                }, p.name || '(未命名)')),
               h('div', { style: C.projMeta }, '目标：' + (p.objective || '—')),
               h('div', { style: C.projMeta }, '下一步：' + (p.next_action || '—')),
               h('button', {
@@ -461,11 +489,68 @@ window.__ModuleLoader__.load({
         }, '收起'),
       ) : null
 
+      /**
+       * 详情页六分区（路线图硬约束：每区空态都必须有一句话，不许空白）。
+       * 徽标只认 confidence==='inferred'；未确认清单由后端算好（unconfirmed），前端不重算。
+       */
+      const detailView = detail ? (() => {
+        const wrapStyle = C.form
+        if (detail.err) {
+          return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'error' },
+            h('div', { style: C.err, role: 'alert' }, '详情读取失败：' + detail.err))
+        }
+        const dd = detail.data
+        if (!dd) {
+          return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'loading' },
+            h('div', { style: C.empty }, '读取详情中…'))
+        }
+        if (dd.found === false) {
+          return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'missing' },
+            h('div', { style: C.empty }, '这个项目已经不在了（可能被归档或删除）。'),
+            h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起'))
+        }
+        const p = dd.project || {}
+        const badge = (conf) => (conf === 'inferred'
+          ? h('span', { style: Object.assign({}, C.tag, { color: '#b06000' }), 'data-badge': 'inferred' }, '未确认')
+          : null)
+        const line = (k, v) => h('div', { style: C.projMeta }, k + '：' + (v || '—'))
+        const sessions = (dd.sessions || []).map((l) => h('div', { key: 'ds' + l.id, style: C.item },
+          badge(l.confidence), l.role + ' · ' + l.session_id + ' · ' + (l.basis || '—')))
+        const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, style: C.item },
+          badge(w.confidence), (w.workspace_title || w.workspace_id) + ' · ' + (w.basis || '—')))
+        const deliverables = (dd.deliverables || []).map((x) => h('div', { key: 'dd' + x.id, style: C.item },
+          badge(x.confidence), (x.title || x.id) + ' · ' + (x.kind || '?') + ' · ' + (x.state || '?')))
+        const logs = (dd.logs || []).slice(0, 10).map((l) => h('div', { key: 'dl' + l.id, style: C.item },
+          String(l.at || '').slice(0, 19).replace('T', ' ') + ' · ' + l.op + ' · ' + (l.summary || '')))
+        const unconf = (dd.unconfirmed || []).map((u) => h('div', { key: 'du' + u.kind + u.id, style: C.item },
+          badge('inferred'), u.kind + ' · ' + (u.title || u.session_id || u.workspace_id || u.id) + ' · ' + (u.basis || '—')))
+        const sec = (key, title, count, body, emptyText) => h('div', { 'data-section': key },
+          h('div', { style: C.groupHead }, title + ' · ' + count),
+          count === 0 ? h('div', { style: C.empty }, emptyText) : body)
+        return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
+          h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
+          sec('project', '1 · 项目', 1, h('div', null,
+            line('目标', p.objective),
+            line('下一步', p.next_action),
+            line('完成判据', Array.isArray(p.done_when) && p.done_when.length ? p.done_when.join('；') : ''),
+            line('标签', Array.isArray(p.tags) && p.tags.length ? p.tags.join(' / ') : ''),
+            line('状态', (p.status || '') + ' · ' + (p.kind || '') + ' · ' + (p.confidence || '')),
+          ), '—'),
+          sec('sessions', '2 · 关联会话', sessions.length, sessions, '还没有关联会话。用项目行上的「关联会话」挂一个。'),
+          sec('workspaces', '3 · 工作区', workspaces.length, workspaces, '还没有登记工作区。这一版只读，不做自动发现。'),
+          sec('deliverables', '4 · 交付物', deliverables.length, deliverables, '还没有交付物。这一版只读，注册入口在后续版本。'),
+          sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
+          sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
+          h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情'),
+        )
+      })() : null
+
       return h('div', { style: C.wrap, 'data-project-lite': 'panel', 'data-meta-state': data.metaState },
         h('h2', { style: C.h2 }, '项目'),
         banner,
         status,
         projectList,
+        detailView,
         linkPicker,
         createForm,
         h('button', { style: C.btn, onClick: () => load(true), disabled: busy }, busy ? '刷新中…' : '刷新'),
