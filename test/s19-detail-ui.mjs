@@ -166,6 +166,8 @@ byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
 await flush()
 tree = render(); flat = flatten(tree)
 push('T28', flat.attrs['data-detail-state'] === 'ready', '第三次点 → 重新展开（toggle 双向可用）')
+const slot = findAll(tree, (n) => n.props && n.props['data-detail-slot'] === 'prj_A')[0]
+push('T30', !!slot && findAll(slot, (n) => n.props && n.props['data-detail'] === '1').length > 0, '详情内嵌在被点项目行下方（data-detail-slot），标题与详情不分离')
 
 await reopenDetail('missing')
 flat = flatten(tree)
@@ -226,6 +228,7 @@ const pick = findAll(tree, (n) => n.props && n.props['data-link-form'] === '1')[
 push('T18', !!pick && String(pick.props.style.overflowY) === 'auto' && String(pick.props.style.maxHeight).length > 0, '关联会话选择器自身可滚动（overflowY=auto + maxHeight）')
 const pickHead = pick && pick.children && pick.children[0]
 push('T29', !!pickHead && String(pickHead.props.style && pickHead.props.style.position) === 'sticky' && String(pickHead.props.style && pickHead.props.style.top) === '0', '关联会话标题行 sticky（top=0），滚候选时收起按钮固定可见')
+push('T31', !!pickHead && !pickHead.props.style.marginBottom && String(pick.props.style.padding).startsWith('0 '), '标题行无透明 margin + picker 上内边距归零（消除滚动缝）')
 
 
 const pass = steps.filter((s) => s.ok).length

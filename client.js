@@ -89,7 +89,7 @@ window.__ModuleLoader__.load({
       detailFull: { gridColumn: '1 / -1' },
       // 关联会话选择器：候选最多 50 条，必须自身滚动，否则下面全被裁掉（2026-11-16 全屏反馈）。
       picker: {
-        border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px', marginTop: '12px',
+        border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '0 12px 10px', marginTop: '12px',
         maxHeight: '62vh', overflowY: 'auto', boxSizing: 'border-box',
       },
       // 列表行「未确认」徽标（点开看依据），与详情第 6 区同源数据。
@@ -486,6 +486,10 @@ window.__ModuleLoader__.load({
                   }, '关联会话')
                 : null,
             ))
+            // v0.10.2：详情内嵌到被点项目行正下方，项目多时标题与详情不分离。
+            if (detail && detail.id === p.id) {
+              rows.push(h('div', { key: 'detail-' + p.id, 'data-detail-slot': p.id, style: { margin: '4px 0 8px' } }, renderDetail()))
+            }
           }
         }
         return h('div', { style: C.list, 'data-overview-state': readOnly ? 'readonly' : (total === 0 ? 'empty' : 'ready') },
@@ -555,7 +559,8 @@ window.__ModuleLoader__.load({
       const linkPicker = linkFor ? h('div', { style: C.picker, 'data-link-form': '1', 'data-link-project': linkFor.id },
         // 「收起」必须固定在标题行：放到滚动区底部时，候选一多就滚出视野，收不起来（2026-11-16 反馈）。
         // 标题行 sticky：滚候选列表时「收起」按钮固定在选择器顶部，不用滚回最上面（2026-11-16 反馈）。
-        h('div', { style: { position: 'sticky', top: 0, zIndex: 2, background: 'Canvas', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', padding: '2px 0', marginBottom: '8px' } },
+        // v0.10.2：上内边距从 picker 移进标题行 + 负 margin 铺满宽度，消除滚动时透出的那条缝。
+        h('div', { style: { position: 'sticky', top: 0, zIndex: 2, background: 'Canvas', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', margin: '0 -12px', padding: '10px 12px 8px' } },
           h('div', { style: C.formTitle }, '关联会话到「' + (linkFor.name || linkFor.id) + '」'),
           h('button', {
             type: 'button',
@@ -623,7 +628,8 @@ window.__ModuleLoader__.load({
        * 详情页六分区（路线图硬约束：每区空态都必须有一句话，不许空白）。
        * 徽标只认 confidence==='inferred'；未确认清单由后端算好（unconfirmed），前端不重算。
        */
-      const detailView = detail ? (() => {
+      // 函数声明（提升）：详情内嵌进列表行，不能在 projectList 之后用 const（暂时性死区）。
+      function renderDetail() { return detail ? (() => {
         const wrapStyle = C.form
         if (detail.err) {
           return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'error' },
@@ -702,7 +708,7 @@ window.__ModuleLoader__.load({
           h('div', { style: C.detailFull },
             h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情')),
         )
-      })() : null
+      })() : null }
 
       return h('div', { style: C.wrap, 'data-project-lite': 'panel', 'data-meta-state': data.metaState },
         h('h2', { style: C.h2 }, '项目'),
@@ -710,7 +716,6 @@ window.__ModuleLoader__.load({
         status,
         projectList,
         basisOverlay,
-        detailView,
         linkPicker,
         createForm,
         h('button', { style: C.btn, onClick: () => load(true), disabled: busy }, busy ? '刷新中…' : '刷新'),
