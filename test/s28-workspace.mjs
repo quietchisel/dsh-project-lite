@@ -145,6 +145,16 @@ push('S2', r.status === 415, 'unlink-workspace 非 JSON → 415')
 r = await call(R, WORKSPACES_PATH, { method: 'POST' })
 push('S3', r.status === 405, 'workspaces 非 GET → 405')
 
+// ---- 静态断言：0.14 工作区右键入口 + 标题回落修法（client 源码级）----
+const clientSrc = await readFile(join(process.argv[2], '..', '..', 'client.js'), 'utf8').catch(() => '')
+// 若路径不对，用仓库根相对路径再试
+const clientSrc2 = clientSrc || await readFile(new URL('../client.js', import.meta.url), 'utf8').catch(() => '')
+const cs = clientSrc2 || clientSrc
+push('X1', cs.includes("target: 'workspace'") && cs.includes("data-ws-link-overlay': '1'") && cs.includes("project-lite.add-workspace-to-project"),
+  '工作区右键注册 target:workspace + 加入项目浮层存在')
+push('X2', !cs.includes("s.title || s.workspace_title ||") && !cs.includes("l.title || l.workspace_title ||"),
+  '会话标题回落不再用工作区名冒充（读不到显示会话短id）')
+
 const pass = steps.filter(s => s.ok).length
 await writeFile(OUT, JSON.stringify({ pass, total: steps.length, steps }, null, 2))
 console.log('RESULT ' + pass + '/' + steps.length)

@@ -154,6 +154,8 @@ window.__ModuleLoader__.load({
       }
     }
     const linkRequest = createLinkRequest()
+    // 0.14：工作区右键「加入项目…」的共享请求（与会话右键分开）。
+    const workspaceProjectRequest = createLinkRequest()
 
     function Panel() {
       const [data, setData] = useState(null)
@@ -851,7 +853,7 @@ window.__ModuleLoader__.load({
                 ? h('div', { style: C.empty }, '没有匹配的会话')
                 : linkData.sessions.map((s) => h('div', { key: 's' + s.session_id, style: Object.assign({}, C.sessRow, C.sessRowHover), 'data-session-id': s.session_id },
                     h('div', { style: C.sessBody },
-                      h('div', { style: C.sessTitle }, s.title || s.workspace_title || ('会话 ' + s.session_id.slice(7, 15))),
+                      h('div', { style: C.sessTitle }, s.title || ('会话 ' + s.session_id.slice(7, 15))),
                       h('div', { style: C.sessSub }, h('span', null, s.workspace_title || '未知工作区'), ' · ', h('span', { style: C.sessId }, s.session_id.slice(0, 13) + '…')),
                     ),
                     h('button', {
@@ -954,7 +956,7 @@ window.__ModuleLoader__.load({
           h('span', { style: C.sessRole, title: '角色：' + (l.role || '—') }, l.role === 'primary' ? '主' : (l.role || '辅')),
           h('div', { style: C.sessBody },
             // 标题为主身份；读不到标题就回落工作区+短 id，不编造。
-            h('div', { style: C.sessTitle }, l.title || l.workspace_title || ('会话 ' + l.session_id.slice(7, 15))),
+            h('div', { style: C.sessTitle }, l.title || ('会话 ' + l.session_id.slice(7, 15))),
             h('div', { style: C.sessSub }, h('span', null, l.basis || '—'), ' · ', h('span', { style: C.sessId }, l.session_id.slice(0, 13) + '…')),
           ),
           l.confidence === 'inferred' ? h('span', { style: C.sessConf }, '未确认') : null,
@@ -962,7 +964,7 @@ window.__ModuleLoader__.load({
             type: 'button', style: C.unlinkBtn,
             'data-action': 'ask-unlink', 'data-for': l.session_id,
             title: '解除这条会话与项目的关联（会话本身不删，可重新关联）',
-            onClick: () => { setOpErr(null); setUnlinkAsk({ project_id: p.id, session_id: l.session_id, title: l.title || l.workspace_title || l.session_id.slice(0, 13), rev: l.rev }) },
+            onClick: () => { setOpErr(null); setUnlinkAsk({ project_id: p.id, session_id: l.session_id, title: l.title || ('会话 ' + l.session_id.slice(0, 13)), rev: l.rev }) },
           }, '移除') : null,
         ))
         const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, 'data-workspace-row': w.workspace_id },
@@ -1181,6 +1183,82 @@ window.__ModuleLoader__.load({
         ))
     }
 
+    /** 0.14：工作区右键「加入项目…」浮层——列项目，选一个把这个工作区关联进去。 */
+    function WorkspaceProjectOverlay() {
+      const [req, setReq] = useState(workspaceProjectRequest.get())
+      const [rows, setRows] = useState(null)
+      const [err, setErr] = useState(null)
+      const [done, setDone] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [wsMeta, setWsMeta] = useState(null)
+
+      useEffect(() => workspaceProjectRequest.subscribe(setReq), [])
+
+      useEffect(() => {
+        if (!req) return undefined
+        let alive = true
+        fetch(API_OVERVIEW, { cache: 'no-store' })
+          .then((res) => res.json())
+          .then((json) => {
+            if (!alive) return
+            if (json && json.ok) {
+              const items = []
+              for (const g of (json.groups || [])) for (const p of (g.items || [])) items.push(p)
+              setRows(items); setErr(null)
+            } else { setRows(null); setErr('读不到项目列表') }
+          })
+          .catch((e) => { if (alive) { setRows(null); setErr(String(e && e.message ? e.message : e)) } })
+        // 一并拉工作区候选，按 id 匹配真实 title/path（右键 target 只给 id/title）。
+        fetch(API_WORKSPACES + '?limit=200', { cache: 'no-store' })
+          .then((res) => res.json())
+          .then((json) => { if (alive && json && json.ok) setWsMeta((json.workspaces || []).find((w) => w.workspace_id === req.workspaceId) || null) })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [req])
+
+      if (!req) return null
+      const close = () => { workspaceProjectRequest.set(null); setDone(null); setErr(null); setRows(null) }
+      const link = async (p) => {
+        setBusy(true); setErr(null); setDone(null)
+        try {
+          const res = await fetch(API_LINK_WORKSPACE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: newRequestId(), project_id: p.id,
+              workspace_id: req.workspaceId,
+              workspace_title: (wsMeta && wsMeta.title) || req.displayTitle,
+              workspace_path: (wsMeta && wsMeta.path) || req.path || undefined,
+              basis: '工作区右键关联',
+            }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) setDone((json.changed ? '已加入：' : '本来就在里面，零副作用：') + (p.name || p.id))
+          else { const er = json && json.error; setErr((er && (er.message || er.code)) || ('HTTP ' + res.status)) }
+        } catch (e) { setErr(String(e && e.message ? e.message : e)) }
+        finally { setBusy(false) }
+      }
+
+      return h('div', { style: C.overlayMask, 'data-ws-link-overlay': '1' },
+        h('div', { style: C.overlayBox },
+          h('div', { style: C.formTitle }, '把这个工作区加入项目'),
+          h('div', { style: C.projMeta }, req.displayTitle || req.workspaceId),
+          h('div', { style: C.muted }, req.workspaceId),
+          err ? h('div', { style: C.err, role: 'alert', 'data-overlay-error': '1' }, '失败：' + err) : null,
+          done ? h('div', { style: C.done, 'data-overlay-done': '1' }, done) : null,
+          rows === null
+            ? h('div', { style: C.empty }, '读取项目列表…')
+            : rows.length === 0
+              ? h('div', { style: C.empty }, '还没有项目。先到侧栏「项目」里建一个。')
+              : rows.map((p) => h('div', { key: 'wop' + p.id, style: C.proj, 'data-overlay-project': p.id },
+                  h('div', { style: C.projName }, p.name || p.id),
+                  h('div', { style: C.projMeta }, p.next_action || '—'),
+                  h('button', { type: 'button', style: C.pickBtn, disabled: busy, 'data-action': 'overlay-link-workspace', onClick: () => link(p) }, '加入'),
+                )),
+          h('button', { type: 'button', style: C.btn, onClick: close }, '关闭'),
+        ))
+    }
+
     /**
      * S4 会话头部项目徽标（原设想「全部价值」所在）：
      * 出现在你正在干活的会话标题旁，不用主动打开项目面板。
@@ -1256,6 +1334,38 @@ window.__ModuleLoader__.load({
             order: 300,
           }, LinkOverlay))
         } catch (e) { /* 没有 shell.overlay 就只保留面板侧入口 */ }
+
+        // 0.14：工作区右键「加入项目…」的浮层 + 菜单入口。
+        try {
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay', id: 'project-lite-ws-link', order: 310,
+          }, WorkspaceProjectOverlay))
+        } catch (e) { /* 浮层不可用就少一个入口，面板不受影响 */ }
+
+        try {
+          if (typeof ctx.inject === 'function') {
+            ctx.inject(['contextMenus'], (child) => {
+              const menus = child.contextMenus
+              if (!menus || typeof menus.register !== 'function') return
+              child.effect(() => menus.register({
+                id: 'project-lite.add-workspace-to-project',
+                target: 'workspace',
+                order: 200,
+                resolve: (target) => [{
+                  id: 'project-lite.add-workspace-to-project',
+                  label: '加入项目…',
+                  run: () => {
+                    workspaceProjectRequest.set({
+                      workspaceId: target.workspaceId,
+                      displayTitle: target.displayTitle || target.workspaceId,
+                      path: target.path || '',
+                    })
+                  },
+                }],
+              }), 'project-lite: workspace menu')
+            })
+          }
+        } catch (e) { /* 工作区右键不可用就少一个入口，面板不受影响 */ }
 
         try {
           if (typeof ctx.inject === 'function') {

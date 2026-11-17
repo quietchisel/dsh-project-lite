@@ -158,6 +158,8 @@ push('T10', flat.text.some((x) => x.includes('还没有交付物')), '交付物�
 push('T11', flat.text.some((x) => x.includes('推断依据')), '依据区把 basis 显示出来')
 const sessRows = findAll(tree, (n) => n.props && n.props['data-session-row'])
 push('T32', sessRows.length === 1 && JSON.stringify(sessRows[0]).includes('DSH现状审计 · 全量盘查'), '详情会话行显示人能认的标题（不是裸 session id）')
+push('T33', !src.includes("l.title || l.workspace_title ||") && src.includes("l.title || ('会话 ' + l.session_id.slice(7, 15))"),
+  '详情会话标题读不到时回落会话短id，不用工作区名冒充')
 
 // --- toggle：再点同一个项目标题 → 收起；第三次点 → 重新展开 ---
 byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()

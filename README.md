@@ -156,9 +156,9 @@ test/               回归（见下节）
 
 ```bash
 npm run check      # 两个入口的语法门禁
-npm test           # 界面层 82 条（s13 28 + s15 22 + s19 32）——零依赖，任何机器可跑
-npm run test:core  # core 层 234 条（14 套，含 s26 Agent、s27 解绑/回收站、s28 工作区）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 316 条（17 套）
+npm test           # 界面层 83 条（s13 28 + s15 22 + s19 33）——零依赖，任何机器可跑
+npm run test:core  # core 层 236 条（14 套，含 s26 Agent、s27 解绑/回收站、s28 工作区）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 319 条（17 套）
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
@@ -171,7 +171,7 @@ npm run test:all   # 全部 316 条（17 套）
 ## 已知限制
 
 1. **物理删除未做**：删除项目走软删除（status→deleted 回收站，可恢复），解除关联走软标记（unlinked，可复活）——都不物理删记录，因为删记录会破基线导致整库只读（E-10）。真正的物理抹除不提供。见上方 API 表。
-2. 交付物区**只读**，不做自动发现、不做注册写入口。工作区区已可关联/解除（v0.13），工作区候选来自 DSH `workspace.json`，不手打 id。
+2. 交付物区**只读**，不做自动发现、不做注册写入口。工作区区已可关联/解除（v0.13），工作区候选来自 DSH `workspace.json`，不手打 id；也可在 DSH 工作区右键「加入项目…」反向挂（v0.13.1）。
 3. 对账第 3 条已接 DSH 会话注册表：健康域 `9/0/0`；夹具域（无 `workspace.json`）`8/0/1`（那 1 项按设计 skipped）——两者都属正常。
 4. 没有做真实 IO 故障注入（权限拒绝、磁盘满）的自动化测试。
 5. 公共 CI 只覆盖界面层（原因见上节），core 层改动**不能只靠 CI**。
