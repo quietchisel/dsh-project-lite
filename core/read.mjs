@@ -125,7 +125,8 @@ export function createReadService(store, options = {}) {
     }
     // 0.12：解除过关联的会话（unlinked）不出现在详情里；记录还在，重新关联可复活。
     const links = await withTitles(tableAll(store, 'project_session').filter((l) => l.project_id === id && !l.unlinked).map(linkView))
-    const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id)
+    // 0.13：解除过关联的工作区（unlinked）不出现在详情第3区；记录还在，重新关联可复活。
+    const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id && !w.unlinked)
     const deliverables = tableAll(store, 'deliverable').filter((d) => d.project_id === id)
     const keys = new Set([id, ...links.map((l) => l.id)])
     // changelog 倒序 + 上限 100：详情页只用来"看最近发生了什么"，不做全量导出。

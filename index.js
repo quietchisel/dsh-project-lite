@@ -56,6 +56,11 @@ export const RESTORE_PATH = '/api/project/restore'
 export const UNLINK_PATH = '/api/project/unlink'
 export const DELETE_PATH = '/api/project/delete'
 
+/** 0.13：工作区候选（GET）+ 关联/解除工作区（POST 写）。 */
+export const WORKSPACES_PATH = '/api/project/workspaces'
+export const LINK_WORKSPACE_PATH = '/api/project/link-workspace'
+export const UNLINK_WORKSPACE_PATH = '/api/project/unlink-workspace'
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -305,6 +310,7 @@ export function apply(ctx, config = {}) {
         const actKey = JSON.stringify({
           op: 'create', name: body.name, objective: body.objective, next_action: body.next_action,
           done_when: body.done_when ?? null, tags: body.tags ?? null, legacy_refs: body.legacy_refs ?? null, session_id: body.session_id ?? null,
+          workspace_id: body.workspace_id ?? null, workspace_title: body.workspace_title ?? null, workspace_path: body.workspace_path ?? null,
           basis: body.basis ?? null, confidence: body.confidence ?? null, kind: body.kind ?? null, status,
         })
         const claimed = await s.claimRequest(body.requestId, actKey, () => s.createProject({
@@ -315,6 +321,9 @@ export function apply(ctx, config = {}) {
           tags: body.tags,
           legacy_refs: body.legacy_refs,
           session_id: body.session_id,
+          workspace_id: body.workspace_id,
+          workspace_title: body.workspace_title,
+          workspace_path: body.workspace_path,
           basis: body.basis,
           confidence: body.confidence,
           kind: body.kind,
@@ -322,7 +331,7 @@ export function apply(ctx, config = {}) {
         }))
         const out = claimed.value
         await evidence({ phase: 'create-served', project_id: out.project.id, replayed: claimed.replayed })
-        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out.project, link: out.link, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out.project, link: out.link, workspaceLink: out.workspaceLink ?? null, replayed: claimed.replayed })
       } catch (error) {
         const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
         const message = String(error && error.message ? error.message : error)
@@ -362,6 +371,34 @@ export function apply(ctx, config = {}) {
       } catch (error) {
         const message = String(error && error.message ? error.message : error)
         await evidence({ phase: 'sessions-error', error: message })
+        return jsonResponse(errorBody('INTERNAL_ERROR', message), 500)
+      }
+    },
+  }))
+
+  // ---- 0.13 只读：工作区候选列表（列出 DSH workspace.json 里的真实工作区） ----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: WORKSPACES_PATH,
+    resource: async (request) => {
+      if (request.method && request.method !== 'GET') {
+        return jsonResponse(errorBody('METHOD_NOT_ALLOWED', 'only GET is allowed: ' + WORKSPACES_PATH), 405)
+      }
+      const url = new URL(request.url)
+      try {
+        const data = await registry.listWorkspaces({
+          q: url.searchParams.get('q') || '',
+          limit: url.searchParams.get('limit') || 200,
+        })
+        if (!data.ok) {
+          await evidence({ phase: 'workspaces-unavailable', reason: data.reason })
+          return jsonResponse(errorBody('REGISTRY_UNAVAILABLE', data.reason || '读不到 DSH 工作区注册表'), 200)
+        }
+        await evidence({ phase: 'workspaces-served', matched: data.matched, returned: data.workspaces.length })
+        return jsonResponse({ ...data, at: new Date().toISOString() })
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error)
+        await evidence({ phase: 'workspaces-error', error: message })
         return jsonResponse(errorBody('INTERNAL_ERROR', message), 500)
       }
     },
@@ -644,6 +681,90 @@ export function apply(ctx, config = {}) {
         const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
           : code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
         await evidence({ phase: 'delete-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.13 写入口：关联 / 解除工作区（软标记，零物理删） ----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: LINK_WORKSPACE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + LINK_WORKSPACE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const project_id = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      const workspace_id = typeof body.workspace_id === 'string' ? body.workspace_id.trim() : ''
+      if (!project_id || !workspace_id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'project_id / workspace_id 必填'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'link-workspace-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝关联工作区：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'link-workspace', project_id, workspace_id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.linkWorkspace({
+          project_id, workspace_id,
+          workspace_title: body.workspace_title, workspace_path: body.workspace_path,
+          basis: body.basis || '界面手动关联工作区', confidence: body.confidence || 'confirmed',
+          expected_rev: body.expected_rev,
+        }))
+        const out = claimed.value
+        await evidence({ phase: 'link-workspace-served', project_id, workspace_id, replayed: claimed.replayed, changed: out?.changed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, replayed: claimed.replayed, changed: !!out?.changed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'link-workspace-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: UNLINK_WORKSPACE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + UNLINK_WORKSPACE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const project_id = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      const workspace_id = typeof body.workspace_id === 'string' ? body.workspace_id.trim() : ''
+      if (!project_id || !workspace_id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'project_id / workspace_id 必填'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'unlink-workspace-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝解除工作区：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'unlink-workspace', project_id, workspace_id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.unlinkWorkspace({ project_id, workspace_id, expected_rev: body.expected_rev }))
+        const out = claimed.value
+        await evidence({ phase: 'unlink-workspace-served', project_id, workspace_id, replayed: claimed.replayed, changed: out?.changed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, replayed: claimed.replayed, changed: !!out?.changed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'LINK_NOT_FOUND' || code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'unlink-workspace-error', code, message })
         return writeJson(res, httpStatus, errorBody(code, message))
       }
     },

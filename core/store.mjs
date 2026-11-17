@@ -282,7 +282,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     meta,
     claimRequest,
     /** 建项目：被引用者先写（project → link → changelog），符合顺序协议 §8.3。 */
-    async createProject({ name, objective, next_action, done_when, tags, kind = 'project', status = 'active', session_id, basis, confidence = 'confirmed', legacy_refs }) {
+    async createProject({ name, objective, next_action, done_when, tags, kind = 'project', status = 'active', session_id, basis, confidence = 'confirmed', legacy_refs, workspace_id, workspace_title, workspace_path }) {
       assertWritable()
       const na = validateNextAction(next_action)
       if (!na.ok) throw new StoreError(na.code, 'next_action 不合格：' + na.reason, { reason: na.reason })
@@ -306,9 +306,14 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (session_id) {
         link = await store.linkSession({ project_id: id, session_id, role: 'primary', basis: record.basis, confidence, source: 'manual' })
       }
+      // 0.13：建项目时带工作区（会话右键预选 / 表单手选），一并关联。
+      let workspaceLink = null
+      if (workspace_id) {
+        workspaceLink = await store.linkWorkspace({ project_id: id, workspace_id, workspace_title, workspace_path, basis: record.basis, confidence })
+      }
       await writeLog('create', 'project', id, '建项目：' + record.name, null, 1)
       await refreshBaseline()
-      return { project: record, link }
+      return { project: record, link, workspaceLink }
     },
 
     /**
@@ -433,6 +438,74 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       await writeLog('unlink', 'project_session', id, '解除关联 ' + session_id.slice(0, 16) + '…', before.rev, next.rev)
       await refreshBaseline()
       return decorateLink(next, true)
+    },
+
+    /**
+     * 0.13 关联工作区：确定性键 project_id + '__' + workspace_id（workspace_id 是 36 位 uuid，
+     * 正好匹配 ProjectWorkspaceSchema 的 id 正则）。软标记、不物理删；重复关联零副作用；
+     * 改内容需 expected_rev；解绑后重新关联自动复活。与 linkSession 同一套安全逻辑。
+     */
+    async linkWorkspace({ project_id, workspace_id, workspace_title, workspace_path, basis, confidence = 'confirmed', expected_rev } = {}) {
+      assertWritable()
+      if (!project_id || !workspace_id) throw new StoreError('INVALID_INPUT', 'project_id / workspace_id 必填')
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspace_id)) {
+        throw new StoreError('INVALID_INPUT', 'workspace_id 必须是 36 位 uuid：' + workspace_id)
+      }
+      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!basis || !String(basis).trim()) throw new StoreError('BASIS_REQUIRED', 'basis 必填')
+      const id = project_id + '__' + workspace_id
+      const existing = domain.table('project_workspace').get(id)
+      const basisText = String(basis)
+      const titleText = typeof workspace_title === 'string' ? workspace_title : undefined
+      const pathText = typeof workspace_path === 'string' ? workspace_path : undefined
+
+      if (existing) {
+        const same = existing.project_id === project_id && existing.workspace_id === workspace_id
+          && existing.workspace_title === titleText && existing.workspace_path === pathText
+          && existing.confidence === confidence && existing.basis === basisText && !existing.unlinked
+        if (same) return { ...existing, changed: false }
+        if (expected_rev === undefined) {
+          throw new StoreError('EXPECTED_REV_REQUIRED', '同一确定性键内容变化时必须提供 expected_rev', { id, actual_rev: existing.rev })
+        }
+        if (existing.rev !== expected_rev) {
+          throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + existing.rev, { expected_rev, actual: existing.rev })
+        }
+        const next = { ...existing, workspace_title: titleText, workspace_path: pathText, confidence, basis: basisText, rev: existing.rev + 1 }
+        delete next.unlinked; delete next.unlinked_at  // 复活
+        assertRecord('project_workspace', next)
+        await domain.table('project_workspace').put(id, next)
+        await writeLog('link', 'project_workspace', id, (existing.unlinked ? '重新关联工作区' : '改挂工作区') + ' ' + (titleText || workspace_id.slice(0, 8)), existing.rev, next.rev)
+        await refreshBaseline()
+        return { ...next, changed: true }
+      }
+
+      const record = { id, project_id, workspace_id, confidence, basis: basisText, created_at: nowIso(), rev: 1 }
+      if (titleText !== undefined) record.workspace_title = titleText
+      if (pathText !== undefined) record.workspace_path = pathText
+      assertRecord('project_workspace', record)
+      await domain.table('project_workspace').put(id, record)
+      await writeLog('link', 'project_workspace', id, '关联工作区 ' + (titleText || workspace_id.slice(0, 8)), null, 1)
+      await refreshBaseline()
+      return { ...record, changed: true }
+    },
+
+    /** 0.13 解除工作区关联：软标记 unlinked，零物理删、可恢复。 */
+    async unlinkWorkspace({ project_id, workspace_id, expected_rev } = {}) {
+      assertWritable()
+      if (!project_id || !workspace_id) throw new StoreError('INVALID_INPUT', 'project_id / workspace_id 必填')
+      const id = project_id + '__' + workspace_id
+      const before = domain.table('project_workspace').get(id)
+      if (!before) throw new StoreError('LINK_NOT_FOUND', '这条工作区关联不存在：' + id)
+      if (before.unlinked) return { ...before, changed: false }
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+      const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('project_workspace', next)
+      await domain.table('project_workspace').put(id, next)
+      await writeLog('unlink', 'project_workspace', id, '解除工作区关联 ' + (before.workspace_title || workspace_id.slice(0, 8)), before.rev, next.rev)
+      await refreshBaseline()
+      return { ...next, changed: true }
     },
 
     /**

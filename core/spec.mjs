@@ -74,6 +74,10 @@ export const ProjectWorkspaceSchema = z.object({
   project_id: z.string().min(1),
   workspace_id: z.string().min(1),
   workspace_title: z.string().optional(),
+  // 0.13：path 与软删除标记。旧记录没有这些字段也能读。
+  workspace_path: z.string().optional(),
+  unlinked: z.boolean().optional(),
+  unlinked_at: Iso.optional(),
   confidence: z.enum(['confirmed', 'inferred']),
   basis: z.string().min(1),
   legacy_refs: z.array(LegacyRefSchema).optional(),

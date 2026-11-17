@@ -207,11 +207,12 @@ push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '�
 
 // --- 静态边界 ---
 push('E18', (src.match(/slots\.inject\(/g) || []).length === 4, '注入 4 个 slot（main + sidebar.panellist + shell.overlay + 会话头徽标）')
-push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 7
+push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 9
   && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
   && src.includes("API_ARCHIVE = 'api/project/archive'") && src.includes("API_RESTORE = 'api/project/restore'")
-  && src.includes("API_UNLINK = 'api/project/unlink'") && src.includes("API_DELETE = 'api/project/delete'"),
-  '七处 POST 调用点，端点 create / link / archive / restore / unlink / delete 六个')
+  && src.includes("API_UNLINK = 'api/project/unlink'") && src.includes("API_DELETE = 'api/project/delete'")
+  && src.includes("API_LINK_WORKSPACE = 'api/project/link-workspace'") && src.includes("API_UNLINK_WORKSPACE = 'api/project/unlink-workspace'"),
+  '九处 POST 调用点，端点 create / link / archive / restore / unlink / delete / link-workspace / unlink-workspace 八个')
 push('E20', src.includes("const API_CREATE = 'api/project/create'"), '写路径常量就是 api/project/create')
 
 const pass = steps.filter((s) => s.ok).length

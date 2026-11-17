@@ -153,7 +153,7 @@ push('T5', want.every((k) => flat.sections.includes(k)), '六个 data-section �
 push('T6', flat.badges.filter((b) => b === 'inferred').length === 1, 'inferred 出现「未确认」徽标且只有该出现的那 1 个（' + flat.badges.length + ' 个）')
 push('T7', flat.text.some((x) => x.includes('判据一；判据二')), '完成判据按数组渲染（用；连接）')
 push('T8', flat.text.some((x) => x.includes('甲 / 乙')), '标签渲染')
-push('T9', flat.text.some((x) => x.includes('还没有登记工作区')), '工作区空态有文案（不是空白）')
+push('T9', flat.text.some((x) => x.includes('还没有关联工作区')), '工作区空态有文案（不是空白）')
 push('T10', flat.text.some((x) => x.includes('还没有交付物')), '交付物空态有文案')
 push('T11', flat.text.some((x) => x.includes('推断依据')), '依据区把 basis 显示出来')
 const sessRows = findAll(tree, (n) => n.props && n.props['data-session-row'])

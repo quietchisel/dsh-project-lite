@@ -15,7 +15,7 @@
  */
 import { rm, mkdir, unlink, cp, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { apply, CREATE_PATH, READ_PATHS, STATE_PATH, SESSIONS_PATH, LINK_PATH, ARCHIVE_PATH, RESTORE_PATH, UNLINK_PATH, DELETE_PATH } from '../index.js'
+import { apply, CREATE_PATH, READ_PATHS, STATE_PATH, SESSIONS_PATH, LINK_PATH, ARCHIVE_PATH, RESTORE_PATH, UNLINK_PATH, DELETE_PATH, WORKSPACES_PATH, LINK_WORKSPACE_PATH, UNLINK_WORKSPACE_PATH } from '../index.js'
 import { openStore } from '../core/store.mjs'
 import { snapshotTree, diffSnapshot, makePush, SID } from './_lib.mjs'
 
@@ -117,9 +117,9 @@ async function runHealthy() {
   apply(ctx, { root: GOOD, evidencePath: EVIDENCE })
 
   // ---- 1 注册契约 ----
-  const expected = [STATE_PATH, ...Object.values(READ_PATHS), CREATE_PATH, SESSIONS_PATH, LINK_PATH, ARCHIVE_PATH, RESTORE_PATH, UNLINK_PATH, DELETE_PATH]
-  push('A-1', '12 条路由全部注册（state + 4 只读 + create + sessions + link + archive + restore + unlink + delete）',
-    expected.every((p) => routes.has(p)) && routes.size === 12,
+  const expected = [STATE_PATH, ...Object.values(READ_PATHS), CREATE_PATH, SESSIONS_PATH, LINK_PATH, ARCHIVE_PATH, RESTORE_PATH, UNLINK_PATH, DELETE_PATH, WORKSPACES_PATH, LINK_WORKSPACE_PATH, UNLINK_WORKSPACE_PATH]
+  push('A-1', '15 条路由全部注册（+0.13 workspaces/link-workspace/unlink-workspace）',
+    expected.every((p) => routes.has(p)) && routes.size === 15,
     'registered=' + [...routes.keys()].join(','))
   push('A-2', 'create 路由是 kind:exact', routes.get(CREATE_PATH)?.kind === 'exact',
     'kind=' + routes.get(CREATE_PATH)?.kind)

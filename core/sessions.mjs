@@ -64,8 +64,16 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
       }
     }
     const rawIds = doc?.global?.workspaceIds
+    // 0.13：工作区列表（id/title/path/session 数）。与 byId 同一份快照，不另扫盘。
+    const workspaceRows = Object.entries(workspaces).map(([wid, rec]) => ({
+      workspace_id: wid,
+      title: typeof rec?.title === 'string' ? rec.title : '',
+      path: typeof rec?.path === 'string' ? rec.path : '',
+      session_count: Array.isArray(rec?.sessionIds) ? rec.sessionIds.length : 0,
+    }))
     return {
       byId,
+      workspaceRows,
       workspaceIds: new Set(Array.isArray(rawIds) ? rawIds : []),
       // 区分"字段缺失"（未知，不强制）与"字段是空数组"（明确没有任何工作区，必须拦）。
       workspaceIdsKnown: Array.isArray(rawIds),
@@ -82,17 +90,17 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     try { mtimeMs = (await stat(workspaceFile)).mtimeMs } catch { mtimeMs = null }
     if (!force && snap && snap.mtimeMs === mtimeMs && now - snap.at < ttlMs) return snap
     if (mtimeMs === null) {
-      snap = { at: now, mtimeMs: null, ids: new Set(), byId: new Map(), total: 0, ok: false, reason: 'workspace.json 不存在：' + workspaceFile }
+      snap = { at: now, mtimeMs: null, ids: new Set(), byId: new Map(), workspaceRows: [], total: 0, ok: false, reason: 'workspace.json 不存在：' + workspaceFile }
       return snap
     }
     let parsed
     try {
       parsed = parseWorkspace(await readFile(workspaceFile, 'utf8'))
     } catch (error) {
-      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), workspaceIds: new Set(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
+      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), workspaceRows: [], workspaceIds: new Set(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
       return snap
     }
-    snap = { at: now, mtimeMs, ids: new Set(parsed.byId.keys()), byId: parsed.byId, workspaceIds: parsed.workspaceIds, workspaceIdsKnown: parsed.workspaceIdsKnown, total: parsed.byId.size, ok: true, reason: null }
+    snap = { at: now, mtimeMs, ids: new Set(parsed.byId.keys()), byId: parsed.byId, workspaceRows: parsed.workspaceRows, workspaceIds: parsed.workspaceIds, workspaceIdsKnown: parsed.workspaceIdsKnown, total: parsed.byId.size, ok: true, reason: null }
     return snap
   }
 
@@ -168,6 +176,31 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
   }
 
   /**
+   * 0.13 候选工作区列表（关联工作区用）。来自 workspace.json 的 tables.workspaces，
+   * 只读快照、不读 projcache，毫秒级。q 匹配 id / 标题 / 路径；上限 200。
+   * 返回的工作区带 path，供界面「点开文件夹」用。
+   */
+  async function listWorkspaces({ q = '', limit = 200 } = {}) {
+    const s = await snapshot()
+    const needle = String(q || '').trim().toLowerCase()
+    const max = Math.max(1, Math.min(Number(limit) || 200, 200))
+    let rows = Array.isArray(s.workspaceRows) ? s.workspaceRows : []
+    if (needle !== '') {
+      rows = rows.filter((r) =>
+        String(r.workspace_id).toLowerCase().includes(needle)
+        || (r.title || '').toLowerCase().includes(needle)
+        || (r.path || '').toLowerCase().includes(needle))
+    }
+    rows = rows.slice().sort((a, b) => (a.title || a.workspace_id) < (b.title || b.workspace_id) ? -1 : 1)
+    const matched = rows.length
+    return {
+      ok: s.ok, reason: s.reason,
+      total: Array.isArray(s.workspaceRows) ? s.workspaceRows.length : 0,
+      matched, limit: max, workspaces: rows.slice(0, max),
+    }
+  }
+
+  /**
    * 1.10 fail-closed 三校验（关联前必过，任一不过就零落盘）：
    *   1. 会话在注册表里；
    *   2. 会话所属工作区还在工作区列表里（没被移出）；
@@ -203,5 +236,5 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     return (sessionId) => ids.has(String(sessionId || ''))
   }
 
-  return { snapshot, list, titleOf, titlesOf, existsFn, verify, paths: { workspaceFile, cacheDir } }
+  return { snapshot, list, listWorkspaces, titleOf, titlesOf, existsFn, verify, paths: { workspaceFile, cacheDir } }
 }

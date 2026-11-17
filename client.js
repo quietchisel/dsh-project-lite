@@ -30,6 +30,10 @@ window.__ModuleLoader__.load({
     // 0.12：解除会话关联（软标记）+ 软删除项目（进回收站）。
     const API_UNLINK = 'api/project/unlink'
     const API_DELETE = 'api/project/delete'
+    // 0.13：工作区候选 + 关联/解除。
+    const API_WORKSPACES = 'api/project/workspaces'
+    const API_LINK_WORKSPACE = 'api/project/link-workspace'
+    const API_UNLINK_WORKSPACE = 'api/project/unlink-workspace'
     const API_LINKS_OF_SESSION = 'api/project/links-of-session'
 
     /**
@@ -117,6 +121,12 @@ window.__ModuleLoader__.load({
       unlinkBtn: { fontSize: '10px', padding: '1px 6px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.4)', background: 'transparent', color: 'inherit', cursor: 'pointer', flex: 'none', opacity: 0.8 },
       recycle: { border: '1px dashed rgba(128,128,128,0.4)', borderRadius: '8px', padding: '8px 12px', marginTop: '10px' },
       recycleHead: { fontSize: '11px', cursor: 'pointer', opacity: 0.75, userSelect: 'none' },
+      // 0.13 工作区行：标题可点开文件夹；路径退到元数据；关联/解除按钮复用 pickBtn/unlinkBtn。
+      wsRow: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 6px', borderRadius: '6px', border: '1px solid transparent', marginBottom: '3px' },
+      wsRowHover: { transition: 'background 120ms' },
+      wsBody: { flex: 1, minWidth: 0 },
+      wsTitle: { fontSize: '12px', lineHeight: '18px', color: 'inherit', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      wsPath: { fontSize: '10px', opacity: 0.55, lineHeight: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace' },
     }
 
     /**
@@ -220,6 +230,18 @@ window.__ModuleLoader__.load({
       const [opErr, setOpErr] = useState(null)
       // 回收站（deleted 组）折叠开关：默认收起，不打扰正常视图。
       const [showDeleted, setShowDeleted] = useState(false)
+      // 0.13 工作区选择器：与会话选择器分开，同时只开一个。
+      const [wsFor, setWsFor] = useState(null)
+      const [wsQ, setWsQ] = useState('')
+      const [wsData, setWsData] = useState(null)
+      const [wsBusy, setWsBusy] = useState(false)
+      const [wsErr, setWsErr] = useState(null)
+      const [wsDone, setWsDone] = useState(null)
+      // 建项目时自动带出的工作区候选（从发起会话的工作区预选，可改）。
+      const [createWorkspaceId, setCreateWorkspaceId] = useState('')
+      const [folderTip, setFolderTip] = useState(null)
+      // 工作区解除确认 {project_id, workspace_id, title, rev}
+      const [wsUnlinkAsk, setWsUnlinkAsk] = useState(null)
 
       /**
        * 提交新建。三条铁律：
@@ -244,13 +266,19 @@ window.__ModuleLoader__.load({
               next_action: form.next_action,
               // schema 要 string[]（一个输入框 → 单元素数组）；服务端也会归一化，这里是第一道。
               done_when: form.done_when.trim() ? [form.done_when.trim()] : undefined,
+              // 0.13：初始工作区（可选），建项目时一并关联。
+              ...(createWorkspaceId ? (() => {
+                const w = (wsData && wsData.workspaces || []).find((x) => x.workspace_id === createWorkspaceId)
+                return { workspace_id: createWorkspaceId, workspace_title: w && w.title, workspace_path: w && w.path }
+              })() : {}),
             }),
           })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
           if (json && json.ok && json.project) {
-            setFormDone('已建项目：' + (json.project.name || json.project.id) + (json.replayed ? '（重放：这条请求之前已执行过，未重复建）' : ''))
+            setFormDone('已建项目：' + (json.project.name || json.project.id) + (json.replayed ? '（重放：这条请求之前已执行过，未重复建）' : '') + (json.workspaceLink ? '（已关联初始工作区）' : ''))
             setForm({ name: '', objective: '', next_action: '', done_when: '' })
+            setCreateWorkspaceId('')
             setCreateReqId(null)
             await loadOverview()
           } else {
@@ -287,6 +315,30 @@ window.__ModuleLoader__.load({
           setLinkBusy(false)
         }
       }, [])
+
+      /** 0.13：读工作区候选（DSH workspace.json）。失败只写 wsErr，不白屏。 */
+      const loadWorkspaces = useCallback(async (q) => {
+        setWsBusy(true); setWsErr(null)
+        try {
+          const res = await fetch(API_WORKSPACES + '?limit=200&q=' + encodeURIComponent(q || ''), { cache: 'no-store' })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) { setWsData(json) }
+          else {
+            setWsData(null)
+            const er = json && json.error
+            setWsErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setWsData(null)
+          setWsErr(String(e && e.message ? e.message : e))
+        } finally {
+          setWsBusy(false)
+        }
+      }, [])
+
+      // 0.13：表单的「初始工作区」下拉需要候选，挂载后拉一次（空查询列全部）。
+      useEffect(() => { loadWorkspaces('') }, [loadWorkspaces])
 
       /** 打开项目详情（六分区）。失败只写 detail.err，不动主面板。 */
       const openDetail = useCallback(async (p) => {
@@ -405,6 +457,86 @@ window.__ModuleLoader__.load({
           setOpErr(String(e && e.message ? e.message : e))
         }
       }, [loadOverview, detail])
+
+      /** 0.13：打开工作区选择器。 */
+      const openLinkWorkspace = useCallback((p) => {
+        setWsFor({ id: p.id, name: p.name || p.id })
+        setWsQ(''); setWsData(null); setWsErr(null); setWsDone(null)
+        loadWorkspaces('')
+      }, [loadWorkspaces])
+
+      /** 0.13：关联工作区。软标记，重复点零副作用。 */
+      const submitLinkWorkspace = useCallback(async (w) => {
+        if (!wsFor || wsBusy) return
+        setWsBusy(true); setWsErr(null); setWsDone(null)
+        try {
+          const res = await fetch(API_LINK_WORKSPACE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: newRequestId(), project_id: wsFor.id,
+              workspace_id: w.workspace_id, workspace_title: w.title, workspace_path: w.path,
+              basis: '界面手动关联工作区',
+            }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setWsDone(json.changed ? ('已关联：' + (w.title || w.workspace_id)) : ('已经关联过了，零副作用：' + (w.title || w.workspace_id)))
+            await loadOverview()
+            if (detail && detail.id === wsFor.id) await openDetail({ id: wsFor.id })
+          } else {
+            const er = json && json.error
+            setWsErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setWsErr(String(e && e.message ? e.message : e))
+        } finally {
+          setWsBusy(false)
+        }
+      }, [wsFor, wsBusy, loadOverview, openDetail, detail])
+
+      /** 0.13：解除工作区关联（二次确认后调）。 */
+      const submitUnlinkWorkspace = useCallback(async (ask) => {
+        if (!ask) return
+        setOpErr(null)
+        try {
+          const res = await fetch(API_UNLINK_WORKSPACE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId: newRequestId(), project_id: ask.project_id, workspace_id: ask.workspace_id, expected_rev: ask.rev }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setWsUnlinkAsk(null)
+            await loadOverview()
+            if (detail && detail.id === ask.project_id) await openDetail({ id: ask.project_id })
+          } else {
+            const er = json && json.error
+            setOpErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setOpErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, openDetail, detail])
+
+      /** 0.13：点开工作区文件夹。优先走宿主 shell（DSH 注入），没有就给提示让用户复制路径。 */
+      const openFolder = useCallback(async (w) => {
+        const pathText = w.workspace_path || ''
+        if (!pathText) { setFolderTip('这条工作区没记录路径，无法打开'); return }
+        try {
+          // DSH client 环境可能注入 window.__DSH_BOOT__ 或 shell；按需探测，不写死。
+          const host = typeof window !== 'undefined' ? window : null
+          const shell = host && (host.__DSH_SHELL__ || (host.__DSH_BOOT__ && host.__DSH_BOOT__.shell))
+          if (shell && typeof shell.openPath === 'function') {
+            const r = await shell.openPath(pathText)
+            if (r && typeof r === 'string' && r.length) { setFolderTip('打开失败：' + r + '（路径已显示在下方，可复制）'); return }
+            setFolderTip(null); return
+          }
+          setFolderTip('当前环境不支持直接打开文件夹，路径在下方，可复制：' + pathText)
+        } catch (e) {
+          setFolderTip('打开失败：' + String(e && e.message ? e.message : e) + '（路径在下方，可复制）')
+        }
+      }, [])
 
       /** 打开某个项目的关联选择器（同时只开一个）。 */
       const openLink = useCallback((p) => {
@@ -654,6 +786,20 @@ window.__ModuleLoader__.load({
         mkField('objective', '目标（必填）', '这件事要达成什么'),
         mkField('next_action', '下一步（必填，4-60 字，不能是「继续推进」「待定」这类词）', '例如：跑一次桌面截图验证'),
         mkField('done_when', '完成判据（可选）', '什么样算做完'),
+        // 0.13：初始工作区（可选）。从 DSH 真实工作区里选，建项目时一并关联。
+        h('label', { style: C.field },
+          h('span', { style: C.label }, '初始工作区（可选，建项目时一并关联）'),
+          h('select', {
+            style: C.input, value: createWorkspaceId,
+            disabled: !canCreate || submitting,
+            'data-field': 'create-workspace',
+            onChange: (e) => setCreateWorkspaceId((e && e.target && e.target.value) || ''),
+          },
+            h('option', { value: '' }, '— 不关联 —'),
+            ...((wsData && wsData.workspaces || []).map((w) =>
+              h('option', { key: w.workspace_id, value: w.workspace_id }, (w.title || w.workspace_id) + '（' + w.session_count + ' 会话）'))),
+          ),
+        ),
         h('button', {
           type: 'button',
           style: (canCreate && !submitting) ? C.submit : Object.assign({}, C.submit, C.submitOff),
@@ -722,6 +868,46 @@ window.__ModuleLoader__.load({
         h('div', { style: C.hint }, '关联是幂等的：同一条重复点，rev / changelog / 基线都不会动。会话必须先在 DSH 注册表里存在。'),
       ) : null
 
+      /** 0.13 工作区选择器：列 DSH 真实工作区，勾选关联到项目。 */
+      const wsPicker = wsFor ? h('div', { style: C.picker, 'data-ws-form': '1', 'data-ws-project': wsFor.id },
+        h('div', { style: { position: 'sticky', top: 0, zIndex: 2, background: 'Canvas', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', margin: '0 -12px', padding: '10px 12px 8px' } },
+          h('div', { style: C.formTitle }, '关联工作区到「' + (wsFor.name || wsFor.id) + '」'),
+          h('button', {
+            type: 'button', style: C.pickBtn, 'data-action': 'close-link-workspace',
+            onClick: () => { setWsFor(null); setWsData(null); setWsErr(null); setWsDone(null) },
+          }, '收起'),
+        ),
+        wsErr ? h('div', { style: C.err, role: 'alert', 'data-ws-error': '1' }, '读取/关联失败：' + wsErr) : null,
+        wsDone ? h('div', { style: C.done, 'data-ws-done': '1' }, wsDone) : null,
+        h('label', { style: C.field },
+          h('span', { style: C.label }, '搜索工作区（匹配 id / 标题 / 路径）'),
+          h('input', {
+            type: 'text', style: C.input, value: wsQ,
+            placeholder: '留空列出全部', 'data-field': 'ws-q',
+            onChange: (e) => { const v = e && e.target ? e.target.value : ''; setWsQ(v); loadWorkspaces(v) },
+          }),
+        ),
+        wsData
+          ? h('div', null,
+              h('div', { style: C.muted }, '匹配 ' + wsData.matched + ' 个 / 注册表共 ' + wsData.total + ' 个'),
+              wsData.workspaces.length === 0
+                ? h('div', { style: C.empty }, '没有匹配的工作区')
+                : wsData.workspaces.map((w) => h('div', { key: 'w' + w.workspace_id, style: Object.assign({}, C.wsRow, C.wsRowHover), 'data-workspace-id': w.workspace_id },
+                    h('div', { style: C.wsBody },
+                      h('div', { style: C.sessTitle }, w.title || w.workspace_id),
+                      h('div', { style: C.wsPath }, (w.path || '无路径') + ' · ' + w.session_count + ' 个会话'),
+                    ),
+                    h('button', {
+                      type: 'button', style: Object.assign({}, C.pickBtn, { marginTop: 0, flex: 'none' }),
+                      disabled: wsBusy, 'data-action': 'link-workspace', 'data-workspace': w.workspace_id,
+                      onClick: () => submitLinkWorkspace(w),
+                    }, '关联'),
+                  )),
+            )
+          : h('div', { style: C.empty }, wsBusy ? '读取工作区列表…' : '（还没有候选）'),
+        h('div', { style: C.hint }, '关联是幂等的：重复点零副作用。已解除的工作区重新关联会自动复活。'),
+      ) : null
+
       /** 列表行「未确认」徽标点开的依据浮层：basis + legacy_refs，与详情第 6 区同源。 */
       const basisOverlay = basisFor ? h('div', { style: C.overlayMask, 'data-basis-overlay': '1' },
         h('div', { style: C.overlayBox },
@@ -779,8 +965,36 @@ window.__ModuleLoader__.load({
             onClick: () => { setOpErr(null); setUnlinkAsk({ project_id: p.id, session_id: l.session_id, title: l.title || l.workspace_title || l.session_id.slice(0, 13), rev: l.rev }) },
           }, '移除') : null,
         ))
-        const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, style: C.item },
-          badge(w.confidence), (w.workspace_title || w.workspace_id) + ' · ' + (w.basis || '—')))
+        const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, 'data-workspace-row': w.workspace_id },
+          h('div', { style: Object.assign({}, C.wsRow, C.wsRowHover) },
+            h('div', { style: C.wsBody },
+              // 标题可点开文件夹；没路径时点了给提示，不静默。
+              h('div', {
+                style: C.wsTitle, role: 'button', tabIndex: 0,
+                title: (w.workspace_path || '无路径') + '（点击打开文件夹）',
+                'data-action': 'open-folder', 'data-for': w.workspace_id,
+                onClick: () => openFolder(w),
+                onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFolder(w) } },
+              }, w.workspace_title || w.workspace_id),
+              h('div', { style: C.wsPath }, w.workspace_path || '（无路径记录）'),
+            ),
+            badge(w.confidence),
+            p.status !== 'deleted'
+              ? h('button', {
+                  type: 'button', style: C.unlinkBtn,
+                  'data-action': 'ask-unlink-workspace', 'data-for': w.workspace_id,
+                  title: '解除这个项目与该工作区的关联（工作区本身不删，可重新关联）',
+                  onClick: () => { setOpErr(null); setWsUnlinkAsk({ project_id: p.id, workspace_id: w.workspace_id, title: w.workspace_title || w.workspace_id, rev: w.rev }) },
+                }, '移除') : null,
+          ),
+          wsUnlinkAsk && wsUnlinkAsk.project_id === p.id && wsUnlinkAsk.workspace_id === w.workspace_id
+            ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-unlink-workspace-confirm': '1' },
+                '确认解除「' + wsUnlinkAsk.title + '」与该项目的关联？工作区本身不删。',
+                opErr ? h('div', { style: C.err }, '解除失败：' + opErr) : null,
+                h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-unlink-workspace', onClick: () => submitUnlinkWorkspace(wsUnlinkAsk) }, '确认解除'),
+                h('button', { type: 'button', style: C.pickBtn, onClick: () => setWsUnlinkAsk(null) }, '取消'))
+            : null,
+        ))
         const deliverables = (dd.deliverables || []).map((x) => h('div', { key: 'dd' + x.id, style: C.item },
           badge(x.confidence), (x.title || x.id) + ' · ' + (x.kind || '?') + ' · ' + (x.state || '?')))
         const logs = (dd.logs || []).slice(0, 10).map((l) => h('div', { key: 'dl' + l.id, style: C.item },
@@ -850,7 +1064,19 @@ window.__ModuleLoader__.load({
             line('状态', (p.status || '') + ' · ' + (p.kind || '') + ' · ' + (p.confidence || '')),
           ), '—'),
           sec('sessions', '2 · 关联会话', sessions.length, sessions, '还没有关联会话。用项目行上的「关联会话」挂一个。'),
-          sec('workspaces', '3 · 工作区', workspaces.length, workspaces, '还没有登记工作区。这一版只读，不做自动发现。'),
+          sec('workspaces', '3 · 工作区', workspaces.length,
+            h('div', null,
+              workspaces,
+              folderTip ? h('div', { style: C.notice, 'data-folder-tip': '1' }, folderTip) : null,
+              p.status !== 'deleted'
+                ? h('button', {
+                    type: 'button', style: C.pickBtn,
+                    'data-action': 'open-link-workspace', 'data-for': p.id,
+                    onClick: () => openLinkWorkspace(p),
+                  }, '关联工作区')
+                : null,
+            ),
+            '还没有关联工作区。点「关联工作区」从 DSH 的真实工作区里选。'),
           sec('deliverables', '4 · 交付物', deliverables.length, deliverables, '还没有交付物。这一版只读，注册入口在后续版本。'),
           sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
@@ -866,6 +1092,7 @@ window.__ModuleLoader__.load({
         projectList,
         basisOverlay,
         linkPicker,
+        wsPicker,
         createForm,
         h('button', { style: C.btn, onClick: () => load(true), disabled: busy }, busy ? '刷新中…' : '刷新'),
       )
