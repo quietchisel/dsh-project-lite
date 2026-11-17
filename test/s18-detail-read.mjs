@@ -66,7 +66,7 @@ await sleep(3)
 await s.archiveProject(pid)
 
 const svc = createReadService(s)
-const d = svc.getProject(pid)
+const d = await svc.getProject(pid)
 
 push('C1', Array.isArray(d.project.done_when) && d.project.done_when.length === 2, 'done_when 透传为数组（' + JSON.stringify(d.project.done_when) + '）')
 push('C2', Array.isArray(d.project.tags) && d.project.tags.join(',') === '夹具,详情', 'tags 透传（' + JSON.stringify(d.project.tags) + '）')
@@ -86,7 +86,7 @@ const ops = d.logs.map((l) => l.op)
 push('C10', d.logs.length === 4 && ops[0] === 'archive' && ops[3] === 'create', 'logs 按时间倒序，最新 archive、最早 create（' + ops.join('<') + '）')
 push('C11', d.counts.logs === d.logs.length && d.logs.length <= 100, 'logs 条数与 counts 一致且 ≤100')
 
-const miss = svc.getProject('prj_01M7GT9SB8PTSQMDBH6SHDNR0A')
+const miss = await svc.getProject('prj_01M7GT9SB8PTSQMDBH6SHDNR0A')
 push('C12', miss.found === false && miss.project === null, '找不到项目 → found:false')
 push('C13', Array.isArray(miss.sessions) && Array.isArray(miss.workspaces) && Array.isArray(miss.deliverables) && Array.isArray(miss.logs)
   && miss.sessions.length === 0 && miss.workspaces.length === 0 && miss.deliverables.length === 0 && miss.logs.length === 0,

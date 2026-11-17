@@ -131,25 +131,25 @@ async function runSuite(label, root, expectDegraded) {
   const cases = [
     { path: READ_PATHS.overview, query: '', direct: () => svc.overview() },
     { path: READ_PATHS.get, query: 'id=' + encodeURIComponent(IDS.alpha), direct: () => svc.getProject(IDS.alpha) },
-    { path: READ_PATHS.linksOfSession, query: 'session_id=' + encodeURIComponent(SID(1)), direct: () => svc.linksOfSession(SID(1)) },
+    { path: READ_PATHS.linksOfSession, query: 'session_id=' + encodeURIComponent(SID(1)), direct: () => svc.linksOfSession(SID(1)) }, // 两个异步方法，下方 await
     { path: READ_PATHS.search, query: 'q=' + encodeURIComponent('Alpha'), direct: () => svc.search('Alpha') },
   ]
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i]
     const r = await call(routes, c.path, { query: c.query })
-    const direct = c.direct()
+    const direct = await c.direct()
     const stripped = { ...(r.body || {}) }
     delete stripped.at
     let eq = false
     try { assert.deepStrictEqual(stripped, direct); eq = true } catch { /* 下面报差异 */ }
     push(label + '-5.' + (i + 1), c.path + ' body(去 at) == 服务层直出',
-      r.status === 200 && eq && typeof r.body?.at === 'string' && typeof direct.then !== 'function',
-      'status=' + r.status + ' eq=' + eq + ' directIsPromise=' + (typeof direct.then === 'function'))
+      r.status === 200 && eq && typeof r.body?.at === 'string',
+      'status=' + r.status + ' eq=' + eq) 
   }
-  push(label + '-5.5', '服务层 4 个方法都是同步函数（不是 Promise）',
-    [svc.overview(), svc.getProject(IDS.alpha), svc.linksOfSession(SID(1)), svc.search('x')]
-      .every((v) => typeof v.then !== 'function'),
-    'all sync')
+  push(label + '-5.5', '服务层方法形状：overview/search 同步，getProject/linksOfSession 异步（标题需读注册表）',
+    [svc.overview(), svc.search('x')].every((v) => typeof v.then !== 'function')
+    && [svc.getProject(IDS.alpha), svc.linksOfSession(SID(1))].every((v) => typeof v.then === 'function'),
+    '2 sync + 2 async')
 
   // ---- 5 四组与业务正确性 ----
   const ov = (await call(routes, READ_PATHS.overview)).body

@@ -167,6 +167,8 @@ export function apply(ctx, config = {}) {
           tools: toolsSvc,
           getStore,
           readService: createReadService,
+          titlesOf: registry.titlesOf,
+          registry,
           evidence: (o) => evidence({ ...o, toolSource: source }),
         })
         evidence({ phase: 'agent-tools-registered', source, tools: TOOL_NAMES, notes })
@@ -239,7 +241,7 @@ export function apply(ctx, config = {}) {
         try {
           const s = await getStore()
           await s.refresh()
-          const data = def.serve(createReadService(s), url.searchParams)
+          const data = await def.serve(createReadService(s, { titlesOf: registry.titlesOf, registry }), url.searchParams)
           await evidence({ phase: 'read-served', path: def.path })
           // at 只由路由层加；服务层直出对象 == body 去掉 at 后的内容（验收判据 3）。
           return jsonResponse({ ...data, at: new Date().toISOString() })

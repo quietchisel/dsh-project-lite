@@ -81,7 +81,7 @@ export function registerAgentTools(ctx, deps) {
       if (!args || !args.project_id) return { ok: false, error: 'PROJECT_ID_REQUIRED', message: '必须给 project_id' }
       const s = await getStore()
       await s.refresh()
-      const r = readService(s).getProject(args.project_id)
+      const r = await readService(s, { titlesOf: deps.titlesOf, registry: deps.registry }).getProject(args.project_id)
       if (evidence) evidence({ phase: 'tool-project-get', id: args.project_id, found: r.found })
       return r
     },
@@ -98,7 +98,7 @@ export function registerAgentTools(ctx, deps) {
       if (!sid) return { ok: false, error: 'SESSION_ID_REQUIRED', message: '没有 session_id，且当前调用不在会话里' }
       const s = await getStore()
       await s.refresh()
-      const r = readService(s).linksOfSession(sid)
+      const r = await readService(s, { titlesOf: deps.titlesOf, registry: deps.registry }).linksOfSession(sid)
       return { ok: true, session_id: sid, total: r.total, links: r.links, degraded: r.degraded }
     },
   })

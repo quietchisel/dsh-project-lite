@@ -60,7 +60,32 @@ function linkView(l) {
  * @param store openStore() 返回的 store（长期存活，verdict 由路由层 refresh() 保鲜）
  * @returns {{overview:Function, getProject:Function, linksOfSession:Function, search:Function}}
  */
-export function createReadService(store) {
+export function createReadService(store, options = {}) {
+  const { titlesOf, registry } = options
+  /**
+   * 给一批 link 补身份信息：会话标题（projcache，读不到就没有）+ 工作区名（注册表，几乎总有）。
+   * 前端据此显示「工作区名 / 标题」而不是裸 session id。查不到就不加字段，绝不编造。
+   */
+  async function withTitles(links) {
+    if (!links.length) return links
+    let map = null
+    if (typeof titlesOf === 'function') {
+      try { map = await titlesOf(links.map((l) => l.session_id)) } catch { map = null }
+    }
+    let snap = null
+    if (registry && typeof registry.snapshot === 'function') {
+      try { snap = await registry.snapshot() } catch { snap = null }
+    }
+    return links.map((l) => {
+      const t = map && map[l.session_id]
+      const row = snap && snap.ok && snap.byId.get(l.session_id)
+      const ws = row && row.workspace_title
+      const extra = {}
+      if (t) extra.title = t
+      if (ws) extra.workspace_title = ws
+      return Object.keys(extra).length ? { ...l, ...extra } : l
+    })
+  }
   /** 每条响应都带的可信度上下文：界面拿到就能直接判「能不能写」，不需要再猜。 */
   function common() {
     const d = store.degradationReport()
@@ -89,7 +114,7 @@ export function createReadService(store) {
   }
 
   /** 单项目详情：含关联会话 / 工作区 / 交付物 / 与它有关的 changelog。找不到也返回 200 + found:false。 */
-  function getProject(id) {
+  async function getProject(id) {
     const p = store.project(id)
     if (!p) {
       return snapshot({
@@ -98,7 +123,7 @@ export function createReadService(store) {
         ...common(),
       })
     }
-    const links = tableAll(store, 'project_session').filter((l) => l.project_id === id).map(linkView)
+    const links = await withTitles(tableAll(store, 'project_session').filter((l) => l.project_id === id).map(linkView))
     const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id)
     const deliverables = tableAll(store, 'deliverable').filter((d) => d.project_id === id)
     const keys = new Set([id, ...links.map((l) => l.id)])
@@ -134,10 +159,10 @@ export function createReadService(store) {
   }
 
   /** 某会话属于哪些项目：links 原样 + 对应项目摘要（含 basis / confidence，供徽标与依据浮层用）。 */
-  function linksOfSession(sessionId) {
-    const links = tableAll(store, 'project_session')
+  async function linksOfSession(sessionId) {
+    const links = await withTitles(tableAll(store, 'project_session')
       .filter((l) => l.session_id === sessionId)
-      .map(linkView)
+      .map(linkView))
     const byId = new Map(store.projects().map((p) => [p.id, p]))
     const items = links.map((l) => {
       const p = byId.get(l.project_id)

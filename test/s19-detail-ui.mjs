@@ -57,7 +57,7 @@ const STATE = { ok: true, root: 'R', writable: true, metaState: 'ok', counts: {}
 const DETAIL_OK = {
   ok: true, found: true,
   project: { id: 'prj_A', name: '详情项目', objective: '目标甲', next_action: '下一步甲', status: 'active', kind: 'project', confidence: 'inferred', basis: '推断依据', rev: 3, done_when: ['判据一', '判据二'], tags: ['甲', '乙'], legacy_refs: [] },
-  sessions: [{ id: 'l1', project_id: 'prj_A', session_id: 'session-aaaa', role: 'primary', confidence: 'confirmed', basis: '确认依据', rev: 1 }],
+  sessions: [{ id: 'l1', project_id: 'prj_A', session_id: 'session-aaaa', title: 'DSH现状审计 · 全量盘查', role: 'primary', confidence: 'confirmed', basis: '确认依据', rev: 1 }],
   workspaces: [],
   deliverables: [],
   logs: [{ id: 'g1', at: '2026-11-16T01:00:00.000Z', op: 'create', summary: '建项目' }],
@@ -156,6 +156,8 @@ push('T8', flat.text.some((x) => x.includes('甲 / 乙')), '标签渲染')
 push('T9', flat.text.some((x) => x.includes('还没有登记工作区')), '工作区空态有文案（不是空白）')
 push('T10', flat.text.some((x) => x.includes('还没有交付物')), '交付物空态有文案')
 push('T11', flat.text.some((x) => x.includes('推断依据')), '依据区把 basis 显示出来')
+const sessRows = findAll(tree, (n) => n.props && n.props['data-session-row'])
+push('T32', sessRows.length === 1 && JSON.stringify(sessRows[0]).includes('DSH现状审计 · 全量盘查'), '详情会话行显示人能认的标题（不是裸 session id）')
 
 // --- toggle：再点同一个项目标题 → 收起；第三次点 → 重新展开 ---
 byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()

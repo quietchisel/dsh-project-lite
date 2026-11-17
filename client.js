@@ -100,6 +100,15 @@ window.__ModuleLoader__.load({
       // 会话头部徽标：出现在正在干活的界面，不用主动打开面板（原设想的「全部价值」）。
       headerBadge: { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', lineHeight: '18px', padding: '0 7px', borderRadius: '999px', border: '1px solid rgba(128,128,128,0.45)', color: 'inherit', background: 'transparent', cursor: 'default', whiteSpace: 'nowrap' },
       headerBadgeInferred: { borderColor: '#b06000', color: '#b06000' },
+      // 会话身份卡片（详情第2区 + 关联选择器）：标题为主、id 退到末尾，按 UI 技能的类型层级/语义色规则。
+      sessRow: { display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 6px', borderRadius: '6px', border: '1px solid transparent', marginBottom: '3px' },
+      sessRowHover: { transition: 'background 120ms' },
+      sessBody: { flex: 1, minWidth: 0 },
+      sessTitle: { fontSize: '13px', fontWeight: 600, lineHeight: '18px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      sessSub: { fontSize: '11px', opacity: 0.68, lineHeight: '15px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      sessRole: { fontSize: '10px', lineHeight: '15px', padding: '0 5px', borderRadius: '999px', border: '1px solid currentColor', opacity: 0.85, flex: 'none' },
+      sessId: { fontFamily: 'ui-monospace, monospace', fontSize: '10px', opacity: 0.5 },
+      sessConf: { fontSize: '10px', border: '1px solid currentColor', borderRadius: '999px', padding: '0 5px', color: '#b06000', flex: 'none' },
     }
 
     /**
@@ -595,12 +604,14 @@ window.__ModuleLoader__.load({
               h('div', { style: C.muted }, '匹配 ' + linkData.matched + ' 条 / 注册表共 ' + linkData.total + ' 条，显示前 ' + linkData.sessions.length + ' 条'),
               linkData.sessions.length === 0
                 ? h('div', { style: C.empty }, '没有匹配的会话')
-                : linkData.sessions.map((s) => h('div', { key: 's' + s.session_id, style: C.proj, 'data-session-id': s.session_id },
-                    h('div', { style: C.projName }, s.title || (s.session_id.slice(0, 16) + '…')),
-                    h('div', { style: C.projMeta }, (s.workspace_title || '(未知工作区)') + ' · ' + s.session_id),
+                : linkData.sessions.map((s) => h('div', { key: 's' + s.session_id, style: Object.assign({}, C.sessRow, C.sessRowHover), 'data-session-id': s.session_id },
+                    h('div', { style: C.sessBody },
+                      h('div', { style: C.sessTitle }, s.title || s.workspace_title || ('会话 ' + s.session_id.slice(7, 15))),
+                      h('div', { style: C.sessSub }, h('span', null, s.workspace_title || '未知工作区'), ' · ', h('span', { style: C.sessId }, s.session_id.slice(0, 13) + '…')),
+                    ),
                     h('button', {
                       type: 'button',
-                      style: C.pickBtn,
+                      style: Object.assign({}, C.pickBtn, { marginTop: 0, flex: 'none' }),
                       disabled: linkBusy,
                       'data-action': 'link-session',
                       'data-session': s.session_id,
@@ -654,8 +665,15 @@ window.__ModuleLoader__.load({
           ? h('span', { style: Object.assign({}, C.tag, { color: '#b06000' }), 'data-badge': 'inferred' }, '未确认')
           : null)
         const line = (k, v) => h('div', { style: C.projMeta }, k + '：' + (v || '—'))
-        const sessions = (dd.sessions || []).map((l) => h('div', { key: 'ds' + l.id, style: C.item },
-          badge(l.confidence), l.role + ' · ' + l.session_id + ' · ' + (l.basis || '—')))
+        const sessions = (dd.sessions || []).map((l) => h('div', { key: 'ds' + l.id, style: Object.assign({}, C.sessRow, C.sessRowHover), 'data-session-row': l.session_id },
+          h('span', { style: C.sessRole, title: '角色：' + (l.role || '—') }, l.role === 'primary' ? '主' : (l.role || '辅')),
+          h('div', { style: C.sessBody },
+            // 标题为主身份；读不到标题就回落工作区+短 id，不编造。
+            h('div', { style: C.sessTitle }, l.title || l.workspace_title || ('会话 ' + l.session_id.slice(7, 15))),
+            h('div', { style: C.sessSub }, h('span', null, l.basis || '—'), ' · ', h('span', { style: C.sessId }, l.session_id.slice(0, 13) + '…')),
+          ),
+          l.confidence === 'inferred' ? h('span', { style: C.sessConf }, '未确认') : null,
+        ))
         const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, style: C.item },
           badge(w.confidence), (w.workspace_title || w.workspace_id) + ' · ' + (w.basis || '—')))
         const deliverables = (dd.deliverables || []).map((x) => h('div', { key: 'dd' + x.id, style: C.item },

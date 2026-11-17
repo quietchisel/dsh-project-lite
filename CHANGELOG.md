@@ -8,7 +8,26 @@
 
 （暂无）
 
+## [0.11.1] - 2026-11-17
+
+### 修复（UI/UX 重设计，按 ui-ux-pro-max 规则）
+
+- **关联会话显示人能认的标题**：后端 `linkView` 经 `registry.titlesOf()` 补会话标题（读不到留空、不编造）；详情第 2 区与关联选择器从「role · 一长串 session id · basis」改为「标题为主 + 工作区/角色为辅 + 短 id 退到末尾 + 未确认语义色徽标」。
+- 会话行加 hover 反馈、类型层级（13px 标题 / 11px 元数据）、空态引导。
+- 修真机抓到的工具注册失败：`output.schema.type` 从非法的 `json` 改为 `object`；本地 defineTool 加同口径校验防再漏。
+
+### 测试
+
+- s19 新增 T32（详情会话行显示标题）；s12 适配 getProject/linksOfSession 异步化；**282/282**（15 套全绿）
+
+### 追加修复（同版本）
+
+- 修 `[object Object]`：会话副行把 React 元素与字符串用 `+` 拼接，改为 JSX 数组分项。
+- 标题读不到时回落**工作区名**（registry 注册表几乎总有），不再只显示机器味短 id——真实夹具里两条会话的 projcache 标题文件都不存在，`title:null` 是数据现实，不编造。
+- 真机确认：5 个 Agent 工具已成功注册（evidence `agent-tools-registered`），上一轮 schema 修复生效。
+
 ## [0.11.0] - 2026-11-17
+
 
 ### 新增：兑现原始设想的核心（S4）
 
