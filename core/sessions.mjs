@@ -104,13 +104,24 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     return snap
   }
 
-  /** 单条会话的标题；文件不在 / 读不动 / 没这个字段 → null（不编造）。 */
+  /**
+   * 单条会话的标题；文件不在 / 读不动 / 没这个字段 → null（不编造）。
+   * 0.13.2：DSH 的 projcache 目录混着两种文件名——裸 uuid 与 session- 前缀（实测 301 + 288），
+   * 旧版只拼裸 uuid，带前缀的会话标题永远读不到 → 界面回落成 id。两个候选都试。
+   * 缓存按 mtime 失效：会话标题随任务进度变化、DSH 重写 projcache 时 mtime 变 → 自动重读，
+   * 所以标题更新会自然反映到项目面板，不需要我们另存快照（存了反而会过期）。
+   */
   async function titleOf(sessionId) {
     const uuid = sessionUuid(sessionId)
     if (!/^[0-9a-fA-F-]+$/.test(uuid)) return null
-    const file = join(cacheDir, uuid + '.json')
+    // 两个候选文件名；取第一个真实存在且能 stat 到的。
+    const candidates = [join(cacheDir, uuid + '.json'), join(cacheDir, SESSION_PREFIX + uuid + '.json')]
+    let file = null
     let mtimeMs = null
-    try { mtimeMs = (await stat(file)).mtimeMs } catch { return null }
+    for (const c of candidates) {
+      try { mtimeMs = (await stat(c)).mtimeMs; file = c; break } catch { /* 试下一个 */ }
+    }
+    if (!file) return null
     const hit = titleCache.get(uuid)
     if (hit && hit.mtimeMs === mtimeMs) return hit.title
     let title = null
