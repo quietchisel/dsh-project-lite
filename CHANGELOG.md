@@ -8,6 +8,22 @@
 
 （暂无）
 
+## [0.11.0] - 2026-11-17
+
+### 新增：兑现原始设想的核心（S4）
+
+- **Agent 工具（3 只读 + 2 受控写）**：`project_list` / `project_get` / `project_links_of_session`（只读）；`project_create` / `project_link_session`（只在人明确要求时调，`next_action` 与 `basis` 有硬约束）。工具经 `ctx.tools.register` 注册，走官方 `defineTool`（拿不到则用本地等价），拿不到 tools 服务时插件照常只跑面板。
+- **会话头部项目徽标**：注册到 `conversation.session.header.actions`（list/session scope），打开任一旧会话，标题旁显示它归属的项目 + 置信度；无归属或任何异常则静默不显示（低打扰）。这是原设想里「如果只能做一件事」的那枚徽标。
+- `defineTool` 解析借鉴同 profile 的 `dsh-bili-scroll/lib/hostdeps.mjs`（optional peer 不装会让插件不激活）。
+
+### 测试
+
+- 新增 `s26-agent-tools`（17 项）：注册、只读、写约束、幂等、dispose；**281/281**（15 套全绿）
+
+### 注意
+
+- 工具/徽标是 Host 与 Client 双重改动，**需重启 DSH** 才生效；重启后 evidence 里应有 `agent-tools-registered` 一条。
+
 ## [0.10.2] - 2026-11-16
 
 ### 修复（纯界面交互，client.js）

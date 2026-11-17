@@ -27,6 +27,7 @@ window.__ModuleLoader__.load({
     const API_LINK = 'api/project/link'
     const API_ARCHIVE = 'api/project/archive'
     const API_RESTORE = 'api/project/restore'
+    const API_LINKS_OF_SESSION = 'api/project/links-of-session'
 
     /**
      * 1.8：一次"用户意图"一个 requestId。
@@ -96,6 +97,9 @@ window.__ModuleLoader__.load({
       basisBadge: { display: 'inline-block', fontSize: '10px', lineHeight: '15px', padding: '0 5px', borderRadius: '999px', border: '1px solid #b06000', color: '#b06000', marginLeft: '6px', cursor: 'pointer' },
       overlayMask: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.38)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 },
       overlayBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '10px', padding: '14px 16px', minWidth: '340px', maxWidth: '520px', maxHeight: '70vh', overflow: 'auto', boxShadow: '0 8px 28px rgba(0,0,0,0.28)' },
+      // 会话头部徽标：出现在正在干活的界面，不用主动打开面板（原设想的「全部价值」）。
+      headerBadge: { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', lineHeight: '18px', padding: '0 7px', borderRadius: '999px', border: '1px solid rgba(128,128,128,0.45)', color: 'inherit', background: 'transparent', cursor: 'default', whiteSpace: 'nowrap' },
+      headerBadgeInferred: { borderColor: '#b06000', color: '#b06000' },
     }
 
     /**
@@ -805,6 +809,38 @@ window.__ModuleLoader__.load({
         ))
     }
 
+    /**
+     * S4 会话头部项目徽标（原设想「全部价值」所在）：
+     * 出现在你正在干活的会话标题旁，不用主动打开项目面板。
+     * 容错优先：拿不到 sessionId / 查不到归属 / 任何异常 → 返回 null（低打扰原则），绝不破坏会话头部。
+     */
+    function SessionProjectBadge(props, injectedSid) {
+      // session scope slot 的 inject 回调会收到 framework-resolved sessionId（官方契约 InjectParams）；
+      // props.sessionId 作兜底，两条都没有就静默不显示。
+      const sid = injectedSid || (props && (props.sessionId || (props.session && props.session.id))) || null
+      const [links, setLinks] = useState(null)
+      useEffect(() => {
+        if (!sid) { setLinks(null); return undefined }
+        let alive = true
+        fetch(API_LINKS_OF_SESSION + '?session_id=' + encodeURIComponent(sid), { cache: 'no-store' })
+          .then((r) => r.json())
+          .then((j) => { if (alive) setLinks(j && j.ok ? (j.links || []) : null) })
+          .catch(() => { if (alive) setLinks(null) })
+        return () => { alive = false }
+      }, [sid])
+      // 多条归属时只显示 primary 或第一条，避免标题旁堆一排。
+      const pick = links && links.length
+        ? (links.find((l) => l.role === 'primary') || links[0])
+        : null
+      if (!pick || !pick.project) return null
+      const inferred = pick.confidence === 'inferred' || pick.project.confidence === 'inferred'
+      return h('span', {
+        style: Object.assign({}, C.headerBadge, inferred ? C.headerBadgeInferred : null),
+        title: '项目：' + (pick.project.name || pick.project.id) + '（' + (pick.role || 'primary') + ' · ' + (pick.confidence || '—') + '）',
+        'data-project-badge': pick.project.id,
+      }, '◆ ' + (pick.project.name || pick.project.id))
+    }
+
     /** 侧栏行图标（12 行）。keyed main 没有入口就永远打不开——这是 2026-11-14 桌面实测的结论。 */
     function PanelIcon() {
       return h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true' },
@@ -825,6 +861,16 @@ window.__ModuleLoader__.load({
           order: 120,
           label: () => '项目',
         }, PanelIcon))
+
+        // S4 会话头部徽标：list + session scope，取不到 sessionId 时组件自己返回 null。
+        // 和右键入口一样包 try——这个 slot 不可用时，面板照常工作。
+        try {
+          ctx.slots.inject('conversation.session.header.actions', (sessionId) => ctx.slots.register({
+            name: 'conversation.session.header.actions',
+            id: 'project-lite-badge',
+            order: 260,
+          }, (props) => SessionProjectBadge(props, sessionId)))
+        } catch (e) { /* 没有会话头部 slot 就只保留面板入口 */ }
 
         /**
          * 1.4b：会话右键「加入项目…」。

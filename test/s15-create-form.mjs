@@ -206,7 +206,7 @@ await flush()
 push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '降级态即使触发 onClick 也不发请求（前端闸）')
 
 // --- 静态边界 ---
-push('E18', (src.match(/slots\.inject\(/g) || []).length === 3, '注入 3 个 slot（main + sidebar.panellist + shell.overlay）')
+push('E18', (src.match(/slots\.inject\(/g) || []).length === 4, '注入 4 个 slot（main + sidebar.panellist + shell.overlay + 会话头徽标）')
 push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 5
   && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
   && src.includes("API_ARCHIVE = 'api/project/archive'") && src.includes("API_RESTORE = 'api/project/restore'"),

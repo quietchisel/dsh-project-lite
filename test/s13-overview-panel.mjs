@@ -183,7 +183,7 @@ push('C1', flat.text.includes('Alpha 改造'), '3 次主轮询后列表仍在')
 push('C2', flat.text.some((t) => t.includes('通过')), '3 次主轮询后对账数字仍在（竞态修复未回退）')
 
 // --- 静态边界：不新增 slot、不写 ---
-push('D1', (src.match(/slots\.inject\(/g) || []).length === 3, '注入 3 个 slot（main + sidebar.panellist + shell.overlay 浮层）')
+push('D1', (src.match(/slots\.inject\(/g) || []).length === 4, '注入 4 个 slot（main + sidebar.panellist + shell.overlay + 会话头徽标）')
 // 1.3 起源码里**有**一个写入口（新建项目）。边界改成：写路径只能有一条，且只能是 POST api/project/create。
 // 1.4 起：两个写端点（create / link），三处调用点（面板建项目、面板关联、右键浮层关联）。
 push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 5

@@ -23,6 +23,8 @@ import { join } from 'node:path'
 import { openStore } from './core/store.mjs'
 import { createReadService } from './core/read.mjs'
 import { createSessionRegistry } from './core/sessions.mjs'
+import { registerAgentTools, TOOL_NAMES } from './core/agent-tools.mjs'
+import { loadDefineTool } from './core/hostdeps.mjs'
 
 export const name = 'project-lite'
 /** storageDomain 来自 dsh-base；webServer 只有 web/desktop 应用层有（acp 没有，所以那里不激活）。 */
@@ -153,6 +155,28 @@ export function apply(ctx, config = {}) {
   }
 
   const disposers = []
+
+  // ---- S4 Agent 工具：加分项，拿不到 tools 服务就只跑面板，绝不让主功能不激活 ----
+  let disposeTools = null
+  try {
+    const toolsSvc = typeof ctx.get === 'function' ? ctx.get('tools') : null
+    if (toolsSvc && typeof toolsSvc.register === 'function') {
+      loadDefineTool().then(({ defineTool, source, notes }) => {
+        disposeTools = registerAgentTools(ctx, {
+          defineTool,
+          tools: toolsSvc,
+          getStore,
+          readService: createReadService,
+          evidence: (o) => evidence({ ...o, toolSource: source }),
+        })
+        evidence({ phase: 'agent-tools-registered', source, tools: TOOL_NAMES, notes })
+      }).catch((error) => evidence({ phase: 'agent-tools-failed', message: String(error && error.message ? error.message : error) }))
+    } else {
+      evidence({ phase: 'agent-tools-unavailable', message: 'ctx.tools 不存在，只启用面板' })
+    }
+  } catch (error) {
+    evidence({ phase: 'agent-tools-unavailable', message: String(error && error.message ? error.message : error) })
+  }
 
   // ---- 0a/0b 原有路由，保持行为不变 ----
   disposers.push(ctx.webServer.register({
@@ -536,6 +560,7 @@ export function apply(ctx, config = {}) {
 
   // 卸载/关闭：先撤全部路由，再关自己的域（共享 facility 时绝不 closeAll）。
   ctx.effect(() => async () => {
+    if (disposeTools) { try { disposeTools() } catch {} }
     for (const d of disposers) { try { d() } catch {} }
     if (store) {
       try { await store.close(); await evidence({ phase: 'closed' }) } catch {}

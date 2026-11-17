@@ -101,6 +101,22 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 `next_action` 会被拒的情形：空、短于 4 字、长于 60 字、命中态度词黑名单（`继续推进` / `推进` / `待定` / `深入研究` / `tbd` / `todo` 等）。**「下一步」必须是能直接执行的动作，不是态度。**
 
+## 给 Agent 用（工具）
+
+插件向 DSH 的 Agent 注册 5 个工具（`project_` 前缀，避免与任务看板撞名）：
+
+| 工具 | 用途 | 权限 |
+|---|---|---|
+| `project_list` | 我有哪些项目（摘要 + 四组计数） | 只读 |
+| `project_get` | 这事到哪了（六分区详情 + 变更记录） | 只读 |
+| `project_links_of_session` | 这个会话属于哪个项目（含依据/置信度） | 只读 |
+| `project_create` | 建项目——仅当使用者明确要求；`next_action` 必须是人确认过的动作 | 受控写 |
+| `project_link_session` | 把会话挂到项目——须先取得人同意，`basis` 必填 | 受控写 |
+
+三角色分工：**Agent 负责「看懂」，插件负责「记住」，你负责「点头」。** 工具不提供删除、批量导入或状态修改——那些是人的决定。
+
+会话头部徽标：打开任一旧会话，标题旁会显示它归属的项目（◆ 项目名 + 置信度），不用主动打开项目面板。这是这套机制真正的使用入口——总览页只是补充。
+
 ## 五种降级状态
 
 | `kind` | 触发条件 | 判定优先级 |
@@ -123,6 +139,8 @@ core/
   spec.mjs          表结构与版本
   guard.mjs         磁盘扫描 + 判据（含 .deleting 语义）
   store.mjs         存储层 + 写原语 + reconcile
+  agent-tools.mjs   Agent 工具（S4：3 只读 + 2 受控写）
+  hostdeps.mjs      defineTool 宿主树解析（optional peer 兜底）
   read.mjs          只读服务层（同步读内存）
   util.mjs          ULID / 时间 / next_action 校验
   zip.mjs           备份打包
@@ -133,9 +151,9 @@ test/               回归（见下节）
 
 ```bash
 npm run check      # 两个入口的语法门禁
-npm test           # 界面层 79 条（s13 28 + s15 22 + s19 29）——零依赖，任何机器可跑
-npm run test:core  # core 层 183 条（11 套）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 262 条（14 套）
+npm test           # 界面层 81 条（s13 28 + s15 22 + s19 31）——零依赖，任何机器可跑
+npm run test:core  # core 层 200 条（12 套，含 s26 Agent 工具）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 281 条（15 套）
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
