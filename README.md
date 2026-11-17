@@ -30,8 +30,8 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 1. **降级红条**：标题 + 原因 + 已禁止的写操作；健康时显示「项目数据完整，可写。」
 2. **检查状态**：通过 / 失败 / 未检查三个数字 + 未检查项的名称与原因（区分「核心 · 降级」与「外部 · 未验证」）。
-3. **项目列表 + 新建表单**：按 `active → paused → done → archived` 四组展示；空库有空态；降级时列表只读、表单禁用并写明原因。`inferred` 项目名后带「未确认」徽标，点开看依据浮层（basis + legacy_refs）。
-4. **项目详情**：点项目名展开六分区（项目 / 关联会话 / 工作区 / 交付物 / 变更记录 / 依据），再点一次收起。非归档项目显示「归档」按钮，归档项目显示「恢复」按钮，均有二次确认。
+3. **项目列表 + 新建表单**：按 `active → paused → done → archived` 四组展示，另有折叠的「回收站」（deleted）；空库有空态；降级时列表只读、表单禁用并写明原因。`inferred` 项目名后带「未确认」徽标，点开看依据浮层（basis + legacy_refs）。
+4. **项目详情**：点项目名展开六分区（项目 / 关联会话 / 工作区 / 交付物 / 变更记录 / 依据），再点一次收起。非归档项目显示「归档」「删除」按钮，归档/回收站项目显示「恢复」按钮，均有二次确认；关联会话行可「移除」（解除关联，会话本身不删，可重新关联）。
 5. **关联会话选择器**：项目行点「关联会话」展开，搜索并挂载会话；「收起」按钮固定在标题行，滚动候选列表时不会滚走。归档项目不显示此按钮（后端也拒绝，409）。
 
 ## 安装
@@ -73,7 +73,7 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 | 方法 | 路径 | 参数 | 说明 |
 |---|---|---|---|
 | GET | `/api/project/state` | `reconcile=1`（可选） | 降级原因 + 检查状态；带 `reconcile=1` 会跑一次对账并落盘 `last_reconcile_*` |
-| GET | `/api/project/overview` | — | 四组项目 + 计数 + `writable` / `degradation` |
+| GET | `/api/project/overview` | — | 四组项目 + 计数 + `writable` / `degradation`；另有 `deleted` 回收站组 |
 | GET | `/api/project/get` | `id` | 单项目详情（六分区：项目/会话/工作区/交付物/变更记录/依据）+ `counts` + `unconfirmed`；`logs` 倒序上限 100；找不到返回 `found:false`，不是 500 |
 | GET | `/api/project/links-of-session` | `session_id` | 某会话属于哪些项目 |
 | GET | `/api/project/search` | `q`，`status`（可选） | 在 name/objective/next_action/tags 里大小写不敏感匹配 |
@@ -81,7 +81,9 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 | GET | `/api/project/sessions` | `q`，`limit`（≤200，默认 50） | 会话候选：归属读 `workspace.json`，标题读会话缓存（读不到给 `null`，不编造） |
 | POST | `/api/project/link` | JSON body | 把会话挂到项目。**幂等**：同一条重复提交零副作用 |
 | POST | `/api/project/archive` | JSON body | 归档（active→archived）。需 `expected_rev` 防覆盖；重复归档 `already_archived:true` 零副作用 |
-| POST | `/api/project/restore` | JSON body | 恢复归档（archived→active）。需 `expected_rev`；非归档 `409 NOT_ARCHIVED` |
+| POST | `/api/project/restore` | JSON body | 恢复归档/回收站（archived→active 或 deleted→active）。需 `expected_rev`；其它状态 `409 NOT_ARCHIVED` |
+| POST | `/api/project/unlink` | JSON body | 解除会话关联。软标记 `unlinked`（不物理删记录，可重新关联复活），重复解除零副作用 |
+| POST | `/api/project/delete` | JSON body | 软删除项目（active→deleted 进回收站）。不删记录、可恢复；重复删除 `already_deleted:true` |
 
 `POST /api/project/create` 的 body：
 
@@ -93,7 +95,7 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 
 **所有写入在落盘前都会用读路径同一份 schema 校验**（`spec.tables[*].valueSchema`）：不合法直接 `RECORD_INVALID`，一个字节都不写。这一层不能省——域层只在开库时校验磁盘记录，`put` 不校验，漏了这一层就会出现「写得进去、下次开库被隔离、整库降级只读」（0.2.1 修的就是这个）。
 
-四个写入口（create / link / archive / restore）都接受可选 `requestId`（4-64 位字母数字 `_-`）：同 id 同参数 → 回上次结果且 `replayed:true`；同 id 不同参数 → `409 REQUEST_ID_CONFLICT`。
+六个写入口（create / link / archive / restore / unlink / delete）都接受可选 `requestId`（4-64 位字母数字 `_-`）：同 id 同参数 → 回上次结果且 `replayed:true`；同 id 不同参数 → `409 REQUEST_ID_CONFLICT`。
 
 `POST /api/project/link` 的 body：`{ "project_id": "prj_…", "session_id": "session-…", "role": "primary|supporting", "basis": "必填，依据" }`。会话必须先在 DSH 注册表里存在，否则 `400 SESSION_NOT_FOUND`。
 
@@ -132,7 +134,7 @@ DSH（DeepSeek Harness）的轻量项目面板插件：**在项目数据可能�
 ## 目录结构
 
 ```
-index.js            Host 半：10 条 exact 路由 + storageDomain 接入
+index.js            Host 半：12 条 exact 路由 + storageDomain 接入
 client.js           Client 半：面板（main slot + sidebar.panellist 入口）
 cordis.patch.yml    DSH 插件补丁声明
 core/
@@ -152,8 +154,8 @@ test/               回归（见下节）
 ```bash
 npm run check      # 两个入口的语法门禁
 npm test           # 界面层 82 条（s13 28 + s15 22 + s19 32）——零依赖，任何机器可跑
-npm run test:core  # core 层 200 条（12 套，含 s26 Agent 工具）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 282 条（15 套）
+npm run test:core  # core 层 219 条（13 套，含 s26 Agent、s27 解绑/回收站）——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 301 条（16 套）
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：
@@ -165,7 +167,7 @@ npm run test:all   # 全部 282 条（15 套）
 
 ## 已知限制
 
-1. **删除功能未做**（不可逆，且不经过项目域）；归档 / 恢复已做，见上方 API 表。
+1. **物理删除未做**：删除项目走软删除（status→deleted 回收站，可恢复），解除关联走软标记（unlinked，可复活）——都不物理删记录，因为删记录会破基线导致整库只读（E-10）。真正的物理抹除不提供。见上方 API 表。
 2. 工作区与交付物两区**只读**，不做自动发现、不做注册写入口。
 3. 对账第 3 条已接 DSH 会话注册表：健康域 `9/0/0`；夹具域（无 `workspace.json`）`8/0/1`（那 1 项按设计 skipped）——两者都属正常。
 4. 没有做真实 IO 故障注入（权限拒绝、磁盘满）的自动化测试。

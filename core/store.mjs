@@ -341,6 +341,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
           && existing.confidence === confidence
           && existing.basis === basisText
           && existing.source === source
+          && !existing.unlinked
         if (same) return decorateLink(existing, false)
         if (expected_rev === undefined) {
           throw new StoreError('EXPECTED_REV_REQUIRED', '同一确定性键的内容发生变化时必须提供 expected_rev（不允许无条件覆盖）', { id, actual_rev: existing.rev })
@@ -349,9 +350,12 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
           throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + existing.rev, { expected_rev, actual: existing.rev })
         }
         const next = { ...existing, role, confidence, basis: basisText, source, rev: existing.rev + 1 }
+        // 0.12 复活：解除过关联的记录被重新关联时，清掉软删除标记。
+        delete next.unlinked
+        delete next.unlinked_at
         assertRecord('project_session', next)
         await domain.table('project_session').put(id, next)
-        await writeLog('link', 'project_session', id, '改挂会话 ' + session_id.slice(0, 16) + '… → ' + role, existing.rev, next.rev)
+        await writeLog('link', 'project_session', id, (existing.unlinked ? '重新关联' : '改挂会话') + ' ' + session_id.slice(0, 16) + '… → ' + role, existing.rev, next.rev)
         await refreshBaseline()
         return decorateLink(next, true)
       }
@@ -391,8 +395,9 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       assertWritable()
       const before = domain.table('project').get(id)
       if (!before) throw new StoreError('PROJECT_NOT_FOUND', id)
-      if (before.status !== 'archived') {
-        throw new StoreError('NOT_ARCHIVED', '项目不是归档状态，无需恢复（当前 ' + before.status + '）')
+      // 0.12：恢复同时服务「归档」与「软删除回收站」两种状态。
+      if (before.status !== 'archived' && before.status !== 'deleted') {
+        throw new StoreError('NOT_ARCHIVED', '项目不是归档/回收站状态，无需恢复（当前 ' + before.status + '）')
       }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
@@ -400,7 +405,53 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       const next = { ...before, status: 'active', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
       assertRecord('project', next)
       await domain.table('project').put(id, next)
-      await writeLog('restore', 'project', id, '恢复归档（子记录零改动）', before.rev, next.rev)
+      await writeLog('restore', 'project', id, (before.status === 'deleted' ? '从回收站恢复' : '恢复归档') + '（子记录零改动）', before.rev, next.rev)
+      await refreshBaseline()
+      return next
+    },
+
+    /**
+     * 0.12 解除关联：软删除一条 project_session，不物理删记录。
+     * 为什么不物理删：域层 delete 在 Node 层无法验证（asar 打包），且删记录会让计数低于
+     * expected_counts → D3 基线回退 → 整库只读（错误账本 E-10）。加 unlinked 标记计数不变，
+     * read 层过滤掉即可；重新 linkSession 时自动复活。旧记录没有 unlinked 字段，按 linked 处理。
+     */
+    async unlinkSession({ project_id, session_id, expected_rev } = {}) {
+      assertWritable()
+      if (!project_id || !session_id) throw new StoreError('INVALID_INPUT', 'project_id / session_id 必填')
+      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      const id = linkKey(project_id, session_id)
+      const before = domain.table('project_session').get(id)
+      if (!before) throw new StoreError('LINK_NOT_FOUND', '这条关联不存在：' + id)
+      if (before.unlinked) return { ...before, changed: false }  // 幂等：已解除，零副作用
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+      const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('project_session', next)
+      await domain.table('project_session').put(id, next)
+      await writeLog('unlink', 'project_session', id, '解除关联 ' + session_id.slice(0, 16) + '…', before.rev, next.rev)
+      await refreshBaseline()
+      return decorateLink(next, true)
+    },
+
+    /**
+     * 0.12 软删除项目：status → deleted（进回收站），零物理删除、零子记录改动。
+     * 与 archiveProject 完全对称：expected_rev 防覆盖、写前 schema 校验、changelog、基线刷新。
+     * 已 deleted 再删 → 幂等零副作用。恢复走 restoreProject（已放宽接受 deleted）。
+     */
+    async deleteProject(id, { expected_rev } = {}) {
+      assertWritable()
+      const before = domain.table('project').get(id)
+      if (!before) throw new StoreError('PROJECT_NOT_FOUND', id)
+      if (before.status === 'deleted') return { ...before, changed: false }
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+      const next = { ...before, status: 'deleted', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
+      assertRecord('project', next)
+      await domain.table('project').put(id, next)
+      await writeLog('delete', 'project', id, '软删除进回收站（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
     },

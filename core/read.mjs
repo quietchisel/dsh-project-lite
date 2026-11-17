@@ -12,7 +12,7 @@
  */
 
 /** 四组固定顺序。 */
-export const STATUS_GROUPS = ['active', 'paused', 'done', 'archived']
+export const STATUS_GROUPS = ['active', 'paused', 'done', 'archived', 'deleted']
 
 /** 统一过一遍 JSON，保证「服务层直出」与「路由 body」逐字段相等（丢掉 undefined / 函数 / 原型）。 */
 const snapshot = (x) => JSON.parse(JSON.stringify(x))
@@ -123,7 +123,8 @@ export function createReadService(store, options = {}) {
         ...common(),
       })
     }
-    const links = await withTitles(tableAll(store, 'project_session').filter((l) => l.project_id === id).map(linkView))
+    // 0.12：解除过关联的会话（unlinked）不出现在详情里；记录还在，重新关联可复活。
+    const links = await withTitles(tableAll(store, 'project_session').filter((l) => l.project_id === id && !l.unlinked).map(linkView))
     const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id)
     const deliverables = tableAll(store, 'deliverable').filter((d) => d.project_id === id)
     const keys = new Set([id, ...links.map((l) => l.id)])
@@ -161,7 +162,7 @@ export function createReadService(store, options = {}) {
   /** 某会话属于哪些项目：links 原样 + 对应项目摘要（含 basis / confidence，供徽标与依据浮层用）。 */
   async function linksOfSession(sessionId) {
     const links = await withTitles(tableAll(store, 'project_session')
-      .filter((l) => l.session_id === sessionId)
+      .filter((l) => l.session_id === sessionId && !l.unlinked)
       .map(linkView))
     const byId = new Map(store.projects().map((p) => [p.id, p]))
     const items = links.map((l) => {

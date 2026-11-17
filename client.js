@@ -27,6 +27,9 @@ window.__ModuleLoader__.load({
     const API_LINK = 'api/project/link'
     const API_ARCHIVE = 'api/project/archive'
     const API_RESTORE = 'api/project/restore'
+    // 0.12：解除会话关联（软标记）+ 软删除项目（进回收站）。
+    const API_UNLINK = 'api/project/unlink'
+    const API_DELETE = 'api/project/delete'
     const API_LINKS_OF_SESSION = 'api/project/links-of-session'
 
     /**
@@ -109,6 +112,11 @@ window.__ModuleLoader__.load({
       sessRole: { fontSize: '10px', lineHeight: '15px', padding: '0 5px', borderRadius: '999px', border: '1px solid currentColor', opacity: 0.85, flex: 'none' },
       sessId: { fontFamily: 'ui-monospace, monospace', fontSize: '10px', opacity: 0.5 },
       sessConf: { fontSize: '10px', border: '1px solid currentColor', borderRadius: '999px', padding: '0 5px', color: '#b06000', flex: 'none' },
+      // 0.12 危险操作：红字红框，但始终带「移除/删除」文字（UI 技能：不能只靠颜色表意）。
+      dangerBtn: { fontSize: '11px', padding: '2px 8px', borderRadius: '6px', border: '1px solid #d93025', background: 'transparent', color: '#c5221f', cursor: 'pointer', flex: 'none' },
+      unlinkBtn: { fontSize: '10px', padding: '1px 6px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.4)', background: 'transparent', color: 'inherit', cursor: 'pointer', flex: 'none', opacity: 0.8 },
+      recycle: { border: '1px dashed rgba(128,128,128,0.4)', borderRadius: '8px', padding: '8px 12px', marginTop: '10px' },
+      recycleHead: { fontSize: '11px', cursor: 'pointer', opacity: 0.75, userSelect: 'none' },
     }
 
     /**
@@ -206,6 +214,12 @@ window.__ModuleLoader__.load({
       const [archiveErr, setArchiveErr] = useState(null)
       // 恢复确认：与归档共用一套确认 UI，用 mode 区分。
       const [restoreAsk, setRestoreAsk] = useState(null)
+      // 0.12：解除关联确认 {project_id, session_id, title, rev}、软删除确认 {id, name, rev}。
+      const [unlinkAsk, setUnlinkAsk] = useState(null)
+      const [deleteAsk, setDeleteAsk] = useState(null)
+      const [opErr, setOpErr] = useState(null)
+      // 回收站（deleted 组）折叠开关：默认收起，不打扰正常视图。
+      const [showDeleted, setShowDeleted] = useState(false)
 
       /**
        * 提交新建。三条铁律：
@@ -342,6 +356,56 @@ window.__ModuleLoader__.load({
         }
       }, [loadOverview, openDetail])
 
+      /** 0.12 解除关联：二次确认后 POST，成功后刷新详情+列表+徽标。 */
+      const submitUnlink = useCallback(async (ask) => {
+        if (!ask) return
+        setOpErr(null)
+        try {
+          const res = await fetch(API_UNLINK, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ project_id: ask.project_id, session_id: ask.session_id, expected_rev: ask.rev, requestId: newRequestId() }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setUnlinkAsk(null)
+            await loadOverview()
+            if (detail && detail.id === ask.project_id) await openDetail({ id: ask.project_id })
+          } else {
+            const er = json && json.error
+            setOpErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setOpErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, openDetail, detail])
+
+      /** 0.12 软删除项目：二次确认后 POST，成功后刷新列表，并清掉该项目的详情。 */
+      const submitDelete = useCallback(async (ask) => {
+        if (!ask) return
+        setOpErr(null)
+        try {
+          const res = await fetch(API_DELETE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: ask.id, expected_rev: ask.rev, requestId: newRequestId() }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setDeleteAsk(null)
+            if (detail && detail.id === ask.id) setDetail(null)
+            await loadOverview()
+          } else {
+            const er = json && json.error
+            setOpErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setOpErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, detail])
+
       /** 打开某个项目的关联选择器（同时只开一个）。 */
       const openLink = useCallback((p) => {
         setLinkFor({ id: p.id, name: p.name || p.id })
@@ -458,11 +522,15 @@ window.__ModuleLoader__.load({
           )
         }
         const groups = Array.isArray(ovData.groups) ? ovData.groups : []
-        const total = Number(ovData.total) || 0
         const dg = ovData.degradation || {}
+        // 0.12：deleted 组是回收站，不计入主列表、单独折叠渲染。
+        const deletedGroup = groups.find((g) => g.key === 'deleted') || null
+        const deletedItems = deletedGroup && Array.isArray(deletedGroup.items) ? deletedGroup.items : []
+        const total = groups.filter((g) => g.key !== 'deleted').reduce((n, g) => n + (Array.isArray(g.items) ? g.items.length : 0), 0)
         const readOnly = ovData.degraded === true || ovData.writable === false
         const rows = []
         for (const g of groups) {
+          if (g.key === 'deleted') continue  // 回收站单独渲染
           const items = Array.isArray(g.items) ? g.items : []
           rows.push(h('div', { key: 'g' + g.key, style: C.groupHead }, (g.key || '?') + ' · ' + items.length))
           for (const p of items) {
@@ -515,6 +583,37 @@ window.__ModuleLoader__.load({
           total === 0
             ? h('div', { style: C.empty }, '暂无项目记录（空库）。用下面的表单建第一个项目。')
             : h('div', null, rows),
+          deletedItems.length
+            ? h('div', { style: C.recycle, 'data-recycle': '1' },
+                h('div', {
+                  style: C.recycleHead, role: 'button', tabIndex: 0,
+                  'data-action': 'toggle-deleted',
+                  onClick: () => setShowDeleted((v) => !v),
+                  onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowDeleted((v) => !v) } },
+                }, (showDeleted ? '▾' : '▸') + ' 回收站（' + deletedItems.length + ' 条，可恢复）'),
+                showDeleted ? h('div', null, deletedItems.map((p) => h('div', { key: 'dl' + p.id, 'data-recycle-id': p.id },
+                  h('div', { style: C.proj },
+                    h('div', { style: C.projName }, p.name || p.id),
+                    h('div', { style: C.projMeta }, 'rev ' + p.rev + ' · 已删除'),
+                    h('button', {
+                      type: 'button',
+                      style: readOnly ? Object.assign({}, C.pickBtn, C.submitOff) : C.pickBtn,
+                      disabled: readOnly,
+                      'data-action': 'ask-restore', 'data-for': p.id,
+                      onClick: () => { setArchiveErr(null); setRestoreAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                    }, '恢复'),
+                  ),
+                  // 回收站行内就地确认：这里没有展开详情，确认 UI 只能放这里。
+                  restoreAsk && restoreAsk.id === p.id
+                    ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-restore-confirm': '1' },
+                        '确认从回收站恢复「' + restoreAsk.name + '」？会移回 active 组。',
+                        archiveErr ? h('div', { style: C.err }, '恢复失败：' + archiveErr) : null,
+                        h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-restore', onClick: () => submitRestore(restoreAsk) }, '确认恢复'),
+                        h('button', { type: 'button', style: C.pickBtn, onClick: () => setRestoreAsk(null) }, '取消'))
+                    : null,
+                ))) : null,
+              )
+            : null,
         )
       })()
 
@@ -673,6 +772,12 @@ window.__ModuleLoader__.load({
             h('div', { style: C.sessSub }, h('span', null, l.basis || '—'), ' · ', h('span', { style: C.sessId }, l.session_id.slice(0, 13) + '…')),
           ),
           l.confidence === 'inferred' ? h('span', { style: C.sessConf }, '未确认') : null,
+          p.status !== 'deleted' ? h('button', {
+            type: 'button', style: C.unlinkBtn,
+            'data-action': 'ask-unlink', 'data-for': l.session_id,
+            title: '解除这条会话与项目的关联（会话本身不删，可重新关联）',
+            onClick: () => { setOpErr(null); setUnlinkAsk({ project_id: p.id, session_id: l.session_id, title: l.title || l.workspace_title || l.session_id.slice(0, 13), rev: l.rev }) },
+          }, '移除') : null,
         ))
         const workspaces = (dd.workspaces || []).map((w) => h('div', { key: 'dw' + w.id, style: C.item },
           badge(w.confidence), (w.workspace_title || w.workspace_id) + ' · ' + (w.basis || '—')))
@@ -690,17 +795,27 @@ window.__ModuleLoader__.load({
         return h('div', { style: C.detail, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
           h('div', { style: Object.assign({}, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }, C.detailFull) },
             h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
-            p.status !== 'archived'
-              ? h('button', {
-                  type: 'button', style: C.pickBtn,
-                  'data-action': 'ask-archive', 'data-for': p.id,
-                  onClick: () => { setArchiveErr(null); setArchiveAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
-                }, '归档')
-              : h('button', {
-                  type: 'button', style: C.pickBtn,
-                  'data-action': 'ask-restore', 'data-for': p.id,
-                  onClick: () => { setArchiveErr(null); setRestoreAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
-                }, '恢复'),
+            h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+              (p.status === 'active' || p.status === 'paused' || p.status === 'done')
+                ? h('button', {
+                    type: 'button', style: C.pickBtn,
+                    'data-action': 'ask-archive', 'data-for': p.id,
+                    onClick: () => { setArchiveErr(null); setArchiveAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                  }, '归档')
+                : h('button', {
+                    type: 'button', style: C.pickBtn,
+                    'data-action': 'ask-restore', 'data-for': p.id,
+                    onClick: () => { setArchiveErr(null); setRestoreAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                  }, '恢复'),
+              p.status !== 'deleted'
+                ? h('button', {
+                    type: 'button', style: C.dangerBtn,
+                    'data-action': 'ask-delete', 'data-for': p.id,
+                    title: '软删除：移入回收站，不物理删数据，可恢复',
+                    onClick: () => { setOpErr(null); setDeleteAsk({ id: p.id, name: p.name || p.id, rev: p.rev }) },
+                  }, '删除')
+                : null,
+            ),
           ),
           archiveAsk && archiveAsk.id === p.id
             ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-archive-confirm': '1' },
@@ -710,10 +825,22 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', style: C.pickBtn, onClick: () => setArchiveAsk(null) }, '取消'))
             : restoreAsk && restoreAsk.id === p.id
             ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-restore-confirm': '1' },
-                '确认恢复「' + restoreAsk.name + '」？会移回 active 组。',
+                '确认恢复「' + restoreAsk.name + '」？' + (p.status === 'deleted' ? '从回收站移回 active 组。' : '会移回 active 组。'),
                 archiveErr ? h('div', { style: C.err }, '恢复失败：' + archiveErr) : null,
                 h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-restore', onClick: () => submitRestore(restoreAsk) }, '确认恢复'),
                 h('button', { type: 'button', style: C.pickBtn, onClick: () => setRestoreAsk(null) }, '取消'))
+            : deleteAsk && deleteAsk.id === p.id
+            ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-delete-confirm': '1' },
+                '确认删除「' + deleteAsk.name + '」？移入回收站，不物理删数据、可恢复。',
+                opErr ? h('div', { style: C.err }, '删除失败：' + opErr) : null,
+                h('button', { type: 'button', style: C.dangerBtn, 'data-action': 'confirm-delete', onClick: () => submitDelete(deleteAsk) }, '确认删除'),
+                h('button', { type: 'button', style: C.pickBtn, onClick: () => setDeleteAsk(null) }, '取消'))
+            : unlinkAsk && unlinkAsk.project_id === p.id
+            ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-unlink-confirm': '1' },
+                '确认解除「' + unlinkAsk.title + '」与该项目的关联？会话本身不删，可重新关联。',
+                opErr ? h('div', { style: C.err }, '解除失败：' + opErr) : null,
+                h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-unlink', onClick: () => submitUnlink(unlinkAsk) }, '确认解除'),
+                h('button', { type: 'button', style: C.pickBtn, onClick: () => setUnlinkAsk(null) }, '取消'))
             : null,
           sec('project', '1 · 项目', 1, h('div', null,
             line('目标', p.objective),

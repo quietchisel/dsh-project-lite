@@ -40,7 +40,8 @@ export const ProjectSchema = z.object({
   next_action: z.string().min(4).max(60),
   done_when: z.array(z.string()).optional(),
   kind: z.enum(['project', 'pipeline']),
-  status: z.enum(['active', 'paused', 'done', 'archived']),
+  /** 0.12：deleted = 软删除，进回收站；不物理删记录，计数不变、基线不破，可恢复。 */
+  status: z.enum(['active', 'paused', 'done', 'archived', 'deleted']),
   tags: z.array(z.string()).max(3).optional(),
   confidence: z.enum(['confirmed', 'inferred']),
   basis: z.string().min(1),
@@ -60,6 +61,9 @@ export const ProjectSessionSchema = z.object({
   basis: z.string().min(1),
   /** suggestion 已删除：只有"人点的"和"历史接入的"两种（§13.5）。 */
   source: z.enum(['manual', 'legacy']),
+  /** 0.12：true = 已解除关联（软删除）。旧记录没有此字段，按 linked 处理。 */
+  unlinked: z.boolean().optional(),
+  unlinked_at: Iso.optional(),
   legacy_refs: z.array(LegacyRefSchema).optional(),
   created_at: Iso,
   rev: z.number().int().positive(),
@@ -104,7 +108,7 @@ export const ChangelogSchema = z.object({
   id: z.string().regex(/^log_[0-9A-HJKMNP-TV-Z]{26}$/),
   at: Iso,
   actor: z.string().min(1),
-  op: z.enum(['create', 'update', 'link', 'unlink', 'archive', 'restore']),
+  op: z.enum(['create', 'update', 'link', 'unlink', 'archive', 'restore', 'delete']),
   target_table: z.string().min(1),
   target_key: z.string().min(1),
   summary: z.string().min(1),

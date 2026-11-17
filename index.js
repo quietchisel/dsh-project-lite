@@ -52,6 +52,10 @@ export const ARCHIVE_PATH = '/api/project/archive'
 /** 恢复（archived → active；与归档对称）。 */
 export const RESTORE_PATH = '/api/project/restore'
 
+/** 0.12：解除会话关联 + 软删除项目（回收站）。写路由一律 handler 形状。 */
+export const UNLINK_PATH = '/api/project/unlink'
+export const DELETE_PATH = '/api/project/delete'
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -541,8 +545,8 @@ export function apply(ctx, config = {}) {
         }
         const cur = s.project(id)
         if (!cur) return writeJson(res, 404, errorBody('PROJECT_NOT_FOUND', '项目不存在：' + id))
-        if (cur.status !== 'archived') {
-          return writeJson(res, 409, errorBody('NOT_ARCHIVED', '项目不是归档状态（当前 ' + cur.status + '），无需恢复'))
+        if (cur.status !== 'archived' && cur.status !== 'deleted') {
+          return writeJson(res, 409, errorBody('NOT_ARCHIVED', '项目不是归档/回收站状态（当前 ' + cur.status + '），无需恢复'))
         }
         const actKey = JSON.stringify({ op: 'restore', id, expected_rev: body.expected_rev ?? null })
         const claimed = await s.claimRequest(body.requestId, actKey, () => s.restoreProject(id, { expected_rev: body.expected_rev }))
@@ -555,6 +559,91 @@ export function apply(ctx, config = {}) {
         const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' || code === 'NOT_ARCHIVED' ? 409
           : code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
         await evidence({ phase: 'restore-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.12 解除会话关联：第四个写入口，软标记 unlinked，不物理删记录 ----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: UNLINK_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + UNLINK_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const project_id = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      const session_id = typeof body.session_id === 'string' ? body.session_id.trim() : ''
+      if (!project_id || !session_id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'project_id / session_id 必填'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'unlink-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝解除关联：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'unlink', project_id, session_id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.unlinkSession({ project_id, session_id, expected_rev: body.expected_rev }))
+        const out = claimed.value
+        await evidence({ phase: 'unlink-served', project_id, session_id, replayed: claimed.replayed, changed: out?.changed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), link: out, replayed: claimed.replayed, changed: !!out?.changed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'LINK_NOT_FOUND' || code === 'PROJECT_NOT_FOUND' ? 404
+          : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'unlink-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.12 软删除项目：第五个写入口，status→deleted 进回收站，可恢复 ----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: DELETE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + DELETE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: id'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'delete-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝删除：' + (d.title || d.kind)), degradation: d })
+        }
+        const cur = s.project(id)
+        if (!cur) return writeJson(res, 404, errorBody('PROJECT_NOT_FOUND', '项目不存在：' + id))
+        if (cur.status === 'deleted') {
+          return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: cur, replayed: true, already_deleted: true })
+        }
+        const actKey = JSON.stringify({ op: 'delete', id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.deleteProject(id, { expected_rev: body.expected_rev }))
+        const out = claimed.value
+        await evidence({ phase: 'delete-served', id, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out, replayed: claimed.replayed, already_deleted: false })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'delete-error', code, message })
         return writeJson(res, httpStatus, errorBody(code, message))
       }
     },
