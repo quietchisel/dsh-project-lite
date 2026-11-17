@@ -34,6 +34,9 @@ window.__ModuleLoader__.load({
     const API_WORKSPACES = 'api/project/workspaces'
     const API_LINK_WORKSPACE = 'api/project/link-workspace'
     const API_UNLINK_WORKSPACE = 'api/project/unlink-workspace'
+    // 0.14：交付物登记 / 解除索引。
+    const API_DELIVERABLE = 'api/project/deliverable'
+    const API_UNLINK_DELIVERABLE = 'api/project/unlink-deliverable'
     const API_LINKS_OF_SESSION = 'api/project/links-of-session'
 
     /**
@@ -127,6 +130,14 @@ window.__ModuleLoader__.load({
       wsBody: { flex: 1, minWidth: 0 },
       wsTitle: { fontSize: '12px', lineHeight: '18px', color: 'inherit', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       wsPath: { fontSize: '10px', opacity: 0.55, lineHeight: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace' },
+      // 0.14 交付物行：三态用文字+色（不只靠颜色）：✅存在 / ❌失效 / ⚠不可达。
+      dlRow: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 6px', borderRadius: '6px', border: '1px solid transparent', marginBottom: '3px' },
+      dlBody: { flex: 1, minWidth: 0 },
+      dlTitle: { fontSize: '12px', lineHeight: '18px', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      dlMeta: { fontSize: '10px', opacity: 0.6, lineHeight: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace' },
+      dlOk: { fontSize: '10px', color: '#0d652d', flex: 'none' },
+      dlMissing: { fontSize: '10px', color: '#c5221f', flex: 'none' },
+      dlUnreach: { fontSize: '10px', color: '#b06000', flex: 'none' },
     }
 
     /**
@@ -156,6 +167,8 @@ window.__ModuleLoader__.load({
     const linkRequest = createLinkRequest()
     // 0.14：工作区右键「加入项目…」的共享请求（与会话右键分开）。
     const workspaceProjectRequest = createLinkRequest()
+    // 0.14：文件/文件夹右键「加入交付物…」的共享请求。
+    const deliverableRequest = createLinkRequest()
 
     function Panel() {
       const [data, setData] = useState(null)
@@ -244,6 +257,15 @@ window.__ModuleLoader__.load({
       const [folderTip, setFolderTip] = useState(null)
       // 工作区解除确认 {project_id, workspace_id, title, rev}
       const [wsUnlinkAsk, setWsUnlinkAsk] = useState(null)
+      // 0.14 交付物：右键/按钮发起的登记请求 {project_id, kind, path, workspace_id, rel, title}
+      const [deliverableAsk, setDeliverableAsk] = useState(null)
+      // 手填表单（A1 探测不通的回退）：标题 + 绝对路径 + kind + 是否最终成品
+      const [dlForm, setDlForm] = useState({ title: '', path: '', kind: 'doc', is_final: false })
+      const [dlErr, setDlErr] = useState(null)
+      const [dlDone, setDlDone] = useState(null)
+      const [dlBusy, setDlBusy] = useState(false)
+      // 交付物解除确认 {id, title, rev}
+      const [dlUnlinkAsk, setDlUnlinkAsk] = useState(null)
 
       /**
        * 提交新建。三条铁律：
@@ -521,24 +543,83 @@ window.__ModuleLoader__.load({
         }
       }, [loadOverview, openDetail, detail])
 
-      /** 0.13：点开工作区文件夹。优先走宿主 shell（DSH 注入），没有就给提示让用户复制路径。 */
-      const openFolder = useCallback(async (w) => {
-        const pathText = w.workspace_path || ''
-        if (!pathText) { setFolderTip('这条工作区没记录路径，无法打开'); return }
+      /** 0.13/0.14：通用打开路径（文件夹）。优先走宿主 shell，没有就给提示让用户复制。 */
+      const openPath = useCallback(async (pathText, noPathMsg) => {
+        if (!pathText) { setFolderTip(noPathMsg || '没记录路径，无法打开'); return }
         try {
-          // DSH client 环境可能注入 window.__DSH_BOOT__ 或 shell；按需探测，不写死。
           const host = typeof window !== 'undefined' ? window : null
           const shell = host && (host.__DSH_SHELL__ || (host.__DSH_BOOT__ && host.__DSH_BOOT__.shell))
           if (shell && typeof shell.openPath === 'function') {
             const r = await shell.openPath(pathText)
-            if (r && typeof r === 'string' && r.length) { setFolderTip('打开失败：' + r + '（路径已显示在下方，可复制）'); return }
+            if (r && typeof r === 'string' && r.length) { setFolderTip('打开失败：' + r + '（路径在下方，可复制）'); return }
             setFolderTip(null); return
           }
-          setFolderTip('当前环境不支持直接打开文件夹，路径在下方，可复制：' + pathText)
+          setFolderTip('当前环境不支持直接打开，路径在下方，可复制：' + pathText)
         } catch (e) {
           setFolderTip('打开失败：' + String(e && e.message ? e.message : e) + '（路径在下方，可复制）')
         }
       }, [])
+      // 工作区行调通用函数（保留原签名）
+      const openFolder = useCallback(async (w) => {
+        await openPath(w.workspace_path || '', '这条工作区没记录路径，无法打开')
+      }, [openPath])
+
+      /** 0.14 登记交付物：从右键（workspace 相对/absolute path）或手填表单发起。 */
+      const submitAddDeliverable = useCallback(async (ask) => {
+        if (!ask || dlBusy) return
+        setDlBusy(true); setDlErr(null); setDlDone(null)
+        try {
+          const res = await fetch(API_DELIVERABLE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: newRequestId(),
+              project_id: ask.project_id, title: ask.title,
+              kind: ask.kind || 'doc', is_final: !!ask.is_final,
+              locator: ask.locator,
+            }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setDeliverableAsk(null)
+            setDlForm({ title: '', path: '', kind: 'doc', is_final: false })
+            setDlDone('已登记：' + (ask.title || '') + '（只存索引，文件没动）')
+            await loadOverview()
+            if (detail && detail.id === ask.project_id) await openDetail({ id: ask.project_id })
+          } else {
+            const er = json && json.error
+            setDlErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setDlErr(String(e && e.message ? e.message : e))
+        } finally {
+          setDlBusy(false)
+        }
+      }, [dlBusy, loadOverview, openDetail, detail])
+
+      /** 0.14 解除交付物索引（软标记，可恢复）。 */
+      const submitUnlinkDeliverable = useCallback(async (ask) => {
+        if (!ask) return
+        setDlErr(null)
+        try {
+          const res = await fetch(API_UNLINK_DELIVERABLE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId: newRequestId(), id: ask.id, expected_rev: ask.rev }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setDlUnlinkAsk(null)
+            await loadOverview()
+            if (detail && detail.id === ask.project_id) await openDetail({ id: ask.project_id })
+          } else {
+            const er = json && json.error
+            setDlErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
+          }
+        } catch (e) {
+          setDlErr(String(e && e.message ? e.message : e))
+        }
+      }, [loadOverview, openDetail, detail])
 
       /** 打开某个项目的关联选择器（同时只开一个）。 */
       const openLink = useCallback((p) => {
@@ -997,8 +1078,40 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', style: C.pickBtn, onClick: () => setWsUnlinkAsk(null) }, '取消'))
             : null,
         ))
-        const deliverables = (dd.deliverables || []).map((x) => h('div', { key: 'dd' + x.id, style: C.item },
-          badge(x.confidence), (x.title || x.id) + ' · ' + (x.kind || '?') + ' · ' + (x.state || '?')))
+        const allDeliverables = dd.deliverables || []
+        const dlBadge = (st) => st === 'ok'
+          ? h('span', { style: C.dlOk }, '✅ 存在')
+          : st === 'missing'
+          ? h('span', { style: C.dlMissing }, '❌ 失效')
+          : h('span', { style: C.dlUnreach }, '⚠ 不可达')
+        const openDl = (x) => openPath((x.check && x.check.resolved) || (x.locator && x.locator.base_snapshot) || '', '这条交付物没记录路径，无法打开')
+        const dlRow = (x) => h('div', { key: 'dd' + x.id, style: C.dlRow, 'data-deliverable-id': x.id },
+          h('div', { style: C.dlBody },
+            h('div', {
+              style: C.dlTitle, role: 'button', tabIndex: 0,
+              title: (x.check && x.check.resolved) || '无路径',
+              'data-action': 'open-deliverable', 'data-for': x.id,
+              onClick: () => openDl(x),
+              onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDl(x) } },
+            }, x.title || x.id),
+            h('div', { style: C.dlMeta },
+              (x.kind || '?')
+              + ' · ' + ((x.check && x.check.resolved) || (x.locator && x.locator.rel) || (x.locator && x.locator.path) || '无路径')
+              + (x.check && x.check.size != null ? ' · ' + x.check.size + ' B' : '')
+              + (x.check && x.check.mtime ? ' · 改于 ' + String(x.check.mtime).slice(0, 16).replace('T', ' ') : '')
+              + (x.is_final ? ' · 最终成品' : '')),
+          ),
+          dlBadge(x.check && x.check.state),
+          p.status !== 'deleted'
+            ? h('button', {
+                type: 'button', style: C.unlinkBtn,
+                'data-action': 'ask-unlink-deliverable', 'data-for': x.id,
+                title: '解除这条交付物索引（不删文件，可重新登记）',
+                onClick: () => { setDlErr(null); setDlUnlinkAsk({ id: x.id, project_id: p.id, title: x.title || x.id, rev: x.rev }) },
+              }, '移除') : null,
+        )
+        const deliverables = allDeliverables.map(dlRow)
+        const deadDeliverables = allDeliverables.filter((x) => x.check && x.check.state !== 'ok')
         const logs = (dd.logs || []).slice(0, 10).map((l) => h('div', { key: 'dl' + l.id, style: C.item },
           String(l.at || '').slice(0, 19).replace('T', ' ') + ' · ' + l.op
           + ' · ' + (l.source === 'run' ? '程序' : '人工')
@@ -1079,7 +1192,45 @@ window.__ModuleLoader__.load({
                 : null,
             ),
             '还没有关联工作区。点「关联工作区」从 DSH 的真实工作区里选。'),
-          sec('deliverables', '4 · 交付物', deliverables.length, deliverables, '还没有交付物。这一版只读，注册入口在后续版本。'),
+          sec('deliverables', '4 · 交付物', deliverables.length,
+            h('div', null,
+              deliverables,
+              dlDone ? h('div', { style: C.done, 'data-dl-done': '1' }, dlDone) : null,
+              dlErr ? h('div', { style: C.err, 'data-dl-error': '1' }, '交付物操作失败：' + dlErr) : null,
+              folderTip ? h('div', { style: C.notice, 'data-folder-tip-dl': '1' }, folderTip) : null,
+              // 失效单独一块（UI 设计 §5）：列路径 + 最后成功时间 + 打开所在目录，只跳转不删。
+              deadDeliverables.length
+                ? h('div', { style: C.recycle, 'data-dead-deliverables': '1' },
+                    h('div', { style: C.recycleHead }, '需要处理：' + deadDeliverables.length + ' 条交付物路径失效'),
+                    deadDeliverables.map((x) => h('div', { key: 'dead' + x.id, style: C.proj, 'data-dead-id': x.id },
+                      h('div', { style: C.projName }, x.title || x.id),
+                      h('div', { style: C.dlMeta }, (x.check && x.check.pathHint) || (x.check && x.check.resolved) || '无路径'),
+                      h('div', { style: C.projMeta }, '状态：' + (x.check && x.check.state) + (x.check && x.check.mtime ? ' · 最后成功 ' + String(x.check.mtime).slice(0,16).replace('T',' ') : '')),
+                      h('button', {
+                        type: 'button', style: C.pickBtn,
+                        'data-action': 'open-deliverable-dir', 'data-for': x.id,
+                        onClick: () => openPath((x.check && x.check.pathHint) || (x.check && x.check.resolved) || '', '无路径可打开'),
+                      }, '打开所在目录'),
+                    )),
+                  )
+                : null,
+              p.status !== 'deleted'
+                ? h('button', {
+                    type: 'button', style: C.pickBtn,
+                    'data-action': 'ask-add-deliverable', 'data-for': p.id,
+                    onClick: () => { setDlErr(null); setDlDone(null); setDlForm({ title: '', path: '', kind: 'doc', is_final: false }); setDeliverableAsk({ project_id: p.id, mode: 'form' }) },
+                  }, '加交付物')
+                : null,
+              // 解除确认就地显示
+              dlUnlinkAsk && dlUnlinkAsk.project_id === p.id
+                ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-unlink-deliverable-confirm': '1' },
+                    '确认解除「' + dlUnlinkAsk.title + '」的索引？只删索引不删文件。',
+                    dlErr ? h('div', { style: C.err }, '解除失败：' + dlErr) : null,
+                    h('button', { type: 'button', style: C.dangerBtn, 'data-action': 'confirm-unlink-deliverable', onClick: () => submitUnlinkDeliverable(dlUnlinkAsk) }, '确认解除'),
+                    h('button', { type: 'button', style: C.pickBtn, onClick: () => setDlUnlinkAsk(null) }, '取消'))
+                : null,
+            ),
+            '还没有交付物。点「加交付物」登记一个（只存索引，文件不动）。'),
           sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
           h('div', { style: C.detailFull },
@@ -1259,6 +1410,97 @@ window.__ModuleLoader__.load({
         ))
     }
 
+    /** 0.14 A1：交付物登记浮层——列项目选一个，手填/右键带入路径（只索引不搬运）。 */
+    function DeliverableFormOverlay() {
+      const [req, setReq] = useState(deliverableRequest.get())
+      const [rows, setRows] = useState(null)
+      const [err, setErr] = useState(null)
+      const [done, setDone] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [form, setForm] = useState({ title: '', path: '', kind: 'doc', is_final: false })
+
+      useEffect(() => deliverableRequest.subscribe(setReq), [])
+      useEffect(() => {
+        if (!req) return undefined
+        let alive = true
+        fetch(API_OVERVIEW, { cache: 'no-store' })
+          .then((res) => res.json())
+          .then((json) => {
+            if (!alive) return
+            if (json && json.ok) {
+              const items = []
+              for (const g of (json.groups || [])) for (const p of (g.items || [])) items.push(p)
+              setRows(items)
+            } else setRows(null)
+          })
+          .catch(() => { if (alive) setRows(null) })
+        // 右键带入的路径/标题预填（文件右键只给 path，标题取文件名）
+        if (req && req.path) {
+          const name = String(req.path).split(/[\\/]/).pop() || ''
+          setForm((prev) => ({ ...prev, title: req.title || name, path: req.path, kind: req.kind || prev.kind }))
+        }
+        return () => { alive = false }
+      }, [req])
+
+      if (!req) return null
+      const close = () => { deliverableRequest.set(null); setErr(null); setDone(null); setRows(null) }
+      const submit = async (p) => {
+        if (!form.title.trim() || !form.path.trim()) { setErr('标题和路径都要填'); return }
+        setBusy(true); setErr(null); setDone(null)
+        const locator = req.workspace_id && req.rel
+          ? { type: 'workspace', workspace_id: req.workspace_id, rel: req.rel }
+          : { type: 'absolute', path: form.path.trim() }
+        try {
+          const res = await fetch(API_DELIVERABLE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              requestId: newRequestId(), project_id: p.id, title: form.title.trim(),
+              kind: form.kind, is_final: form.is_final, locator,
+            }),
+          })
+          let json = null; try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) setDone('已登记到「' + (p.name || p.id) + '」：' + form.title.trim() + '（只存索引，文件没动）')
+          else { const er = json && json.error; setErr((er && (er.message || er.code)) || ('HTTP ' + res.status)) }
+        } catch (e) { setErr(String(e && e.message ? e.message : e)) }
+        finally { setBusy(false) }
+      }
+      const field = (key, label, ph) => h('label', { style: C.field },
+        h('span', { style: C.label }, label),
+        h('input', { type: 'text', style: C.input, value: form[key], placeholder: ph, 'data-field': 'dl-' + key,
+          onChange: (e) => setForm((prev) => Object.assign({}, prev, { [key]: (e && e.target && e.target.value) || '' })) }))
+
+      return h('div', { style: C.overlayMask, 'data-dl-form-overlay': '1' },
+        h('div', { style: C.overlayBox },
+          h('div', { style: C.formTitle }, '加入交付物（只存索引，文件不搬动）'),
+          h('div', { style: C.muted }, req.displayTitle || req.path || ''),
+          err ? h('div', { style: C.err, role: 'alert' }, '失败：' + err) : null,
+          done ? h('div', { style: C.done }, done) : null,
+          field('title', '名称', '例如：环境审计报告'),
+          h('label', { style: C.field },
+            h('span', { style: C.label }, '路径' + (req.workspace_id ? '（工作区相对路径，已预填）' : '（绝对路径或工作区相对路径）')),
+            h('input', { type: 'text', style: C.input, value: form.path, placeholder: '例如：报告/审计.md 或 D:\\...\\file.zip', 'data-field': 'dl-path',
+              onChange: (e) => setForm((prev) => Object.assign({}, prev, { path: (e && e.target && e.target.value) || '' })) })),
+          h('label', { style: C.field },
+            h('span', { style: C.label }, '类型'),
+            h('select', { style: C.input, value: form.kind, 'data-field': 'dl-kind', onChange: (e) => setForm((prev) => Object.assign({}, prev, { kind: (e && e.target && e.target.value) || 'doc' })) },
+              h('option', { value: 'doc' }, '文档 doc'), h('option', { value: 'zip' }, '压缩包 zip'),
+              h('option', { value: 'code' }, '代码 code'), h('option', { value: 'media' }, '媒体 media'),
+              h('option', { value: 'data' }, '数据 data'))),
+          h('label', { style: Object.assign({}, C.field, { display: 'flex', alignItems: 'center', gap: '8px' }) },
+            h('input', { type: 'checkbox', checked: form.is_final, 'data-field': 'dl-final', onChange: (e) => setForm((prev) => Object.assign({}, prev, { is_final: !!(e && e.target && e.target.checked) })) }),
+            h('span', { style: C.label, marginBottom: 0 }, '是最终成品')),
+          h('div', { style: C.groupHead }, '选项目加入：'),
+          rows === null ? h('div', { style: C.empty }, '读取项目列表…')
+            : rows.length === 0 ? h('div', { style: C.empty }, '还没有项目，先建一个。')
+            : rows.map((p) => h('div', { key: 'dlp' + p.id, style: C.proj, 'data-dl-project': p.id },
+                h('span', null, p.name || p.id),
+                h('button', { type: 'button', style: Object.assign({}, C.pickBtn, { marginTop: 0 }), disabled: busy, 'data-action': 'dl-submit', onClick: () => submit(p) }, '加入'),
+              )),
+          h('button', { type: 'button', style: C.btn, onClick: close }, '关闭'),
+        ))
+    }
+
+
     /**
      * S4 会话头部项目徽标（原设想「全部价值」所在）：
      * 出现在你正在干活的会话标题旁，不用主动打开项目面板。
@@ -1366,6 +1608,41 @@ window.__ModuleLoader__.load({
             })
           }
         } catch (e) { /* 工作区右键不可用就少一个入口，面板不受影响 */ }
+
+        // 0.14 A1：交付物登记浮层 + 文件/文件夹右键入口。
+        try {
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay', id: 'project-lite-deliverable-form', order: 320,
+          }, DeliverableFormOverlay))
+        } catch (e) { /* 浮层不可用就少一个入口，面板不受影响 */ }
+
+        // A1：文件/文件夹右键「加入交付物…」。DSH context-menu 的 file/directory target 带 path。
+        // 探测不通（target 未开放）时静默跳过——用户仍可用详情第4区的「加交付物」手填（A1 回退）。
+        try {
+          if (typeof ctx.inject === 'function') {
+            ctx.inject(['contextMenus'], (child) => {
+              const menus = child.contextMenus
+              if (!menus || typeof menus.register !== 'function') return
+              for (const kind of ['file', 'directory']) {
+                try {
+                  child.effect(() => menus.register({
+                    id: 'project-lite.add-deliverable-' + kind,
+                    target: kind,
+                    order: 280,
+                    resolve: (target) => [{
+                      id: 'project-lite.add-deliverable-' + kind,
+                      label: '加入交付物…',
+                      run: () => {
+                        deliverableRequest.set({ mode: 'form', path: target.path || '', title: '', kind: kind === 'directory' ? 'data' : 'doc' })
+                      },
+                    }],
+                  }), 'project-lite: ' + kind + ' deliverable menu')
+                } catch (e) { /* 该 target 不开放就跳过 */ }
+              }
+            })
+          }
+        } catch (e) { /* contextMenus 不可用就少一个入口 */ }
+
 
         try {
           if (typeof ctx.inject === 'function') {

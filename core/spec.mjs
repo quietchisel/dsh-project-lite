@@ -104,6 +104,9 @@ export const DeliverableSchema = z.object({
   checked_at: z.string().nullable().optional(),
   sha256: z.string().nullable().optional(),
   is_final: z.boolean(),
+  // 0.14：软删除标记。旧记录没有也能读。
+  unlinked: z.boolean().optional(),
+  unlinked_at: Iso.optional(),
   legacy_refs: z.array(LegacyRefSchema).optional(),
   rev: z.number().int().positive(),
 })

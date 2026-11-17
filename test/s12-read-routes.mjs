@@ -98,9 +98,9 @@ async function runSuite(label, root, expectDegraded) {
 
   // ---- 1 注册契约 ----
   const expected = [STATE_PATH, ...Object.values(READ_PATHS)]
-  // 1.3 create(+1) + sessions/link(+2) + archive/restore(+2) + 0.12 unlink/delete(+2) + 0.13 workspaces/link-workspace/unlink-workspace(+3) → 总数 15。
-  push(label + '-1', 'state + 5 条只读路由全部注册（0.13 后总数为 15）',
-    expected.every((p) => routes.has(p)) && routes.size === 15,
+  // ...0.13 共 15 + 0.14 deliverable/unlink-deliverable(+2) → 总数 17。
+  push(label + '-1', 'state + 5 条只读路由全部注册（0.14 后总数为 17）',
+    expected.every((p) => routes.has(p)) && routes.size === 17,
     'registered=' + [...routes.keys()].join(','))
   const newRoutes = Object.values(READ_PATHS).map((p) => routes.get(p))
   push(label + '-2', '新增 4 条均为 kind:exact',

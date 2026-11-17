@@ -8,7 +8,7 @@ import { mkdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { buildSpec, TABLES, VERSION, MetaSchema } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
-import { newProjectId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
+import { newProjectId, newDeliverableId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
 
 /**
  * done_when 归一化：表单只给一个输入框（字符串），schema 要的是 string[]。
@@ -527,6 +527,64 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       await writeLog('delete', 'project', id, '软删除进回收站（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
+    },
+
+    /**
+     * 0.14 登记交付物：只索引不搬运（ADR-12）。locator 由路由层按 B1 算好（workspace 相对 + base_snapshot
+     * 绝对路径快照），store 只做 schema 校验 + 落盘 + changelog，不拼本机路径、不搬运文件。
+     * 降级只读时抛 READONLY_DEGRADED；重复 id 拒绝。
+     */
+    async addDeliverable({ project_id, title, kind = 'doc', locator, is_final = false, state = 'ok', size = null, mtime = null, sha256 = null, basis, confidence = 'confirmed' } = {}) {
+      assertWritable()
+      if (!project_id || !title) throw new StoreError('INVALID_INPUT', 'project_id / title 必填')
+      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!locator || typeof locator !== 'object' || !locator.type) throw new StoreError('INVALID_INPUT', 'locator 必填（type: workspace|absolute）')
+      if (locator.type === 'workspace' && (!locator.workspace_id || !locator.rel)) {
+        throw new StoreError('INVALID_INPUT', 'locator.type=workspace 需 workspace_id + rel')
+      }
+      if (locator.type === 'absolute' && !locator.path) {
+        throw new StoreError('INVALID_INPUT', 'locator.type=absolute 需 path')
+      }
+      const id = newDeliverableId()
+      const record = {
+        id, project_id, title: String(title).slice(0, 120), kind,
+        locator: {
+          type: locator.type,
+          ...(locator.workspace_id ? { workspace_id: locator.workspace_id } : {}),
+          ...(locator.rel ? { rel: locator.rel } : {}),
+          ...(locator.path ? { path: locator.path } : {}),
+          ...(locator.base_snapshot ? { base_snapshot: locator.base_snapshot } : {}),
+          ...(locator.registered_at ? { registered_at: locator.registered_at } : { registered_at: nowIso() }),
+        },
+        state, is_final: !!is_final, rev: 1,
+      }
+      if (size !== null) record.size = size
+      if (mtime !== null) record.mtime = mtime
+      if (sha256 !== null) record.sha256 = sha256
+      if (basis) record.basis = basis
+      if (confidence) record.confidence = confidence
+      assertRecord('deliverable', record)
+      await domain.table('deliverable').put(id, record)
+      await writeLog('create', 'deliverable', id, '登记交付物：' + record.title, null, 1)
+      await refreshBaseline()
+      return { ...record, changed: true }
+    },
+
+    /** 0.14 解除交付物关联：软标记 unlinked，零物理删、可恢复；重复解绑零副作用。 */
+    async unlinkDeliverable(id, { expected_rev } = {}) {
+      assertWritable()
+      const before = domain.table('deliverable').get(id)
+      if (!before) throw new StoreError('LINK_NOT_FOUND', '交付物不存在：' + id)
+      if (before.unlinked) return { ...before, changed: false }
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+      const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('deliverable', next)
+      await domain.table('deliverable').put(id, next)
+      await writeLog('unlink', 'deliverable', id, '解除交付物索引：' + before.title, before.rev, next.rev)
+      await refreshBaseline()
+      return { ...next, changed: true }
     },
 
     project: (id) => domain.table('project').get(id),

@@ -61,6 +61,10 @@ export const WORKSPACES_PATH = '/api/project/workspaces'
 export const LINK_WORKSPACE_PATH = '/api/project/link-workspace'
 export const UNLINK_WORKSPACE_PATH = '/api/project/unlink-workspace'
 
+/** 0.14：交付物登记 / 解除索引（只索引不搬运）。 */
+export const DELIVERABLE_PATH = '/api/project/deliverable'
+export const UNLINK_DELIVERABLE_PATH = '/api/project/unlink-deliverable'
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -765,6 +769,100 @@ export function apply(ctx, config = {}) {
         const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
           : code === 'LINK_NOT_FOUND' || code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
         await evidence({ phase: 'unlink-workspace-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.14 交付物：登记（只索引不搬运）/ 解除索引（软标记） ----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: DELIVERABLE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + DELIVERABLE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const project_id = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      const title = typeof body.title === 'string' ? body.title.trim() : ''
+      if (!project_id || !title) return writeJson(res, 400, errorBody('MISSING_PARAM', 'project_id / title 必填'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'deliverable-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝登记交付物：' + (d.title || d.kind)), degradation: d })
+        }
+        // B1：workspace 相对路径 → 查工作区根拼绝对路径快照；absolute → 原样。
+        const loc = body.locator || {}
+        let locator = null
+        if (loc.type === 'workspace' && loc.workspace_id && loc.rel) {
+          const snap = await registry.snapshot()
+          const ws = (snap.workspaceRows || []).find((w) => w.workspace_id === loc.workspace_id)
+          const base = ws && ws.path ? join(ws.path, loc.rel) : null
+          locator = { type: 'workspace', workspace_id: loc.workspace_id, rel: loc.rel, base_snapshot: base }
+        } else if (loc.type === 'absolute' && loc.path) {
+          locator = { type: 'absolute', path: loc.path, base_snapshot: loc.path }
+        }
+        if (!locator) return writeJson(res, 400, errorBody('INVALID_LOCATOR', 'locator 需 type=workspace(workspace_id+rel) 或 type=absolute(path)'))
+        const actKey = JSON.stringify({ op: 'deliverable', project_id, title, locator, kind: body.kind ?? null, is_final: body.is_final ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.addDeliverable({
+          project_id, title, kind: body.kind || 'doc', locator,
+          is_final: !!body.is_final, size: body.size ?? null, mtime: body.mtime ?? null, sha256: body.sha256 ?? null,
+        }))
+        const out = claimed.value
+        await evidence({ phase: 'deliverable-served', project_id, id: out?.id, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), deliverable: out, replayed: claimed.replayed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'PROJECT_NOT_FOUND' || code === 'INVALID_INPUT' || code === 'INVALID_LOCATOR' ? 400
+          : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'deliverable-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: UNLINK_DELIVERABLE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + UNLINK_DELIVERABLE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: id'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          await evidence({ phase: 'unlink-deliverable-refused', kind: d.kind })
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝解除索引：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'unlink-deliverable', id, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () => s.unlinkDeliverable(id, { expected_rev: body.expected_rev }))
+        const out = claimed.value
+        await evidence({ phase: 'unlink-deliverable-served', id, replayed: claimed.replayed, changed: out?.changed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), deliverable: out, replayed: claimed.replayed, changed: !!out?.changed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'REV_CONFLICT' ? 409
+          : code === 'LINK_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'unlink-deliverable-error', code, message })
         return writeJson(res, httpStatus, errorBody(code, message))
       }
     },

@@ -8,7 +8,7 @@
  *
  * 用法：node test\s29-session-title.mjs <BASE> <OUT.json>
  */
-import { rm, mkdir, writeFile } from 'node:fs/promises'
+import { rm, mkdir, writeFile, stat, utimes } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createSessionRegistry, SESSION_PREFIX } from '../core/sessions.mjs'
 
@@ -44,8 +44,11 @@ push('T2', (await reg.titleOf(SID_PREFIXED)) === '带前缀会话标题', 'sessi
 // T3：没文件 → null，不编造
 push('T3', (await reg.titleOf(SID_NONE)) === null, '无缓存文件 → null（不编造标题）')
 
-// T4：标题随进度变化——重写 projcache（mtime 变）→ 缓存失效读到新标题
-await writeFile(fileFor(SID_BARE, false), JSON.stringify(titleDoc('改过的新标题')), 'utf8')
+// T4：标题随进度变化——重写 projcache 并显式推后 mtime（避免同毫秒写盘漏判，错误账本硬规矩4）→ 缓存失效读到新标题
+const fBare = fileFor(SID_BARE, false)
+const m0 = (await stat(fBare)).mtimeMs
+await writeFile(fBare, JSON.stringify(titleDoc('改过的新标题')), 'utf8')
+await utimes(fBare, new Date(m0 + 2000), new Date(m0 + 2000))
 push('T4', (await reg.titleOf(SID_BARE)) === '改过的新标题', '标题变化后 mtime 失效缓存、读到新标题（随任务进度变化）')
 
 // T5：titlesOf 批量也走同一修复

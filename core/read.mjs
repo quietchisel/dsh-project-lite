@@ -11,6 +11,10 @@
  * 因此 Node 层可独立机检，不依赖宿主 Host。
  */
 
+// 0.14：交付物现场校验只读 stat，不写盘、不引入 now()（保证路由 body 与直出深度相等）。
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
+
 /** 四组固定顺序。 */
 export const STATUS_GROUPS = ['active', 'paused', 'done', 'archived', 'deleted']
 
@@ -54,6 +58,45 @@ function linkView(l) {
     created_at: l.created_at,
     rev: l.rev,
   }
+}
+
+/**
+ * 0.14 C1：现场只读校验一条交付物的路径，返回派生的 check 视图（不改记录、不落盘）。
+ * B1：优先 workspace 相对路径 + 当前工作区根（可移植），失败回落登记时的绝对路径快照 base_snapshot。
+ * 三态：ok / missing / unreachable —— 区分"文件没了"与"盘没插/目录改名"。
+ * 不含 now()：校验时间用 stat.mtime，保证 s12「路由 body == 直出」深度相等。
+ */
+async function checkDeliverable(d, registrySnap) {
+  const loc = d.locator || {}
+  const primary = []
+  if (loc.type === 'workspace' && loc.workspace_id && loc.rel) {
+    const rows = (registrySnap && registrySnap.workspaceRows) || []
+    const ws = rows.find((r) => r.workspace_id === loc.workspace_id)
+    if (ws && ws.path) primary.push(join(ws.path, loc.rel))
+  } else if (loc.type === 'absolute' && loc.path) {
+    primary.push(loc.path)
+  }
+  // 回落：登记时的绝对路径快照（B1）
+  if (loc.base_snapshot) primary.push(loc.base_snapshot)
+
+  const statOne = async (p) => {
+    try {
+      const s = await stat(p)
+      return { state: 'ok', resolved: p, size: s.size, mtime: s.mtime.toISOString() }
+    } catch (e) {
+      const code = e && e.code
+      return { state: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unreachable', resolved: p, size: null, mtime: null }
+    }
+  }
+  if (!primary.length) return { state: 'unreachable', resolved: null, size: null, mtime: null, pathHint: null }
+  let first = null
+  for (const p of primary) {
+    const r = await statOne(p)
+    if (!first) first = r
+    if (r.state === 'ok') return r
+  }
+  // 都失败：报第一个候选的状态，并给出快照当人工找回线索
+  return { ...first, pathHint: loc.base_snapshot || null }
 }
 
 /**
@@ -127,7 +170,17 @@ export function createReadService(store, options = {}) {
     const links = await withTitles(tableAll(store, 'project_session').filter((l) => l.project_id === id && !l.unlinked).map(linkView))
     // 0.13：解除过关联的工作区（unlinked）不出现在详情第3区；记录还在，重新关联可复活。
     const workspaces = tableAll(store, 'project_workspace').filter((w) => w.project_id === id && !w.unlinked)
-    const deliverables = tableAll(store, 'deliverable').filter((d) => d.project_id === id)
+    // 0.14：交付物现场只读校验（C1）；过滤 unlinked 软删除项；registry 快照取一次复用。
+    let dSnap = null
+    if (registry && typeof registry.snapshot === 'function') {
+      try { dSnap = await registry.snapshot() } catch { dSnap = null }
+    }
+    const deliverablesRaw = tableAll(store, 'deliverable').filter((d) => d.project_id === id && !d.unlinked)
+    const deliverables = []
+    for (const d of deliverablesRaw) {
+      const check = await checkDeliverable(d, dSnap)
+      deliverables.push({ ...d, check })
+    }
     const keys = new Set([id, ...links.map((l) => l.id)])
     // changelog 倒序 + 上限 100：详情页只用来"看最近发生了什么"，不做全量导出。
     const logs = store.logs()

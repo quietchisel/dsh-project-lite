@@ -183,16 +183,17 @@ push('C1', flat.text.includes('Alpha 改造'), '3 次主轮询后列表仍在')
 push('C2', flat.text.some((t) => t.includes('通过')), '3 次主轮询后对账数字仍在（竞态修复未回退）')
 
 // --- 静态边界：不新增 slot、不写 ---
-push('D1', (src.match(/slots\.inject\(/g) || []).length === 5, '注入 5 个 slot（main + sidebar.panellist + 2×shell.overlay + 会话头徽标）')
+push('D1', (src.match(/slots\.inject\(/g) || []).length === 6, '注入 6 个 slot（main + sidebar.panellist + 3×shell.overlay + 会话头徽标）')
 // 1.3 起源码里**有**一个写入口（新建项目）。边界改成：写路径只能有一条，且只能是 POST api/project/create。
 // 1.4 起：两个写端点（create / link），三处调用点（面板建项目、面板关联、右键浮层关联）。
-push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 10
+push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 13
   && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
   && src.includes("API_ARCHIVE = 'api/project/archive'") && src.includes("API_RESTORE = 'api/project/restore'")
   && src.includes("API_UNLINK = 'api/project/unlink'") && src.includes("API_DELETE = 'api/project/delete'")
   && src.includes("API_LINK_WORKSPACE = 'api/project/link-workspace'") && src.includes("API_UNLINK_WORKSPACE = 'api/project/unlink-workspace'")
+  && src.includes("API_DELIVERABLE = 'api/project/deliverable'") && src.includes("API_UNLINK_DELIVERABLE = 'api/project/unlink-deliverable'")
   && src.includes("data-action': 'confirm-delete'") && src.includes("data-recycle': '1'"),
-  '八个写端点 / 十处 POST 调用点（含工作区右键浮层）')
+  '十个写端点 / 十三处 POST 调用点（含工作区/交付物浮层）')
 push('D3', src.includes("const API_OVERVIEW = 'api/project/overview'"), 'overview 走只读 GET 相对路径')
 push('D4', src.includes('const [ovData, setOvData]') && src.includes('const [ovError, setOvError]'), 'overview 用独立 state')
 
