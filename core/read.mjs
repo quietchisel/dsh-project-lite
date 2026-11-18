@@ -115,6 +115,17 @@ export function createReadService(store, options = {}) {
     if (typeof titlesOf === 'function') {
       try { map = await titlesOf(links.map((l) => l.session_id)) } catch { map = null }
     }
+    // 0.14.1 兜底：titlesOf 漏读/异常时，用 registry.titleOf 逐条重读（详情请求量小）。
+    if (registry && typeof registry.titleOf === 'function') {
+      for (const l of links) {
+        if (!map || !map.get(l.session_id)) {
+          try {
+            const one = await registry.titleOf(l.session_id)
+            if (one) { if (!map) map = new Map(); map.set(l.session_id, one) }
+          } catch { /* 单条失败留空，不编造 */ }
+        }
+      }
+    }
     let snap = null
     if (registry && typeof registry.snapshot === 'function') {
       try { snap = await registry.snapshot() } catch { snap = null }

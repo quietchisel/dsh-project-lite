@@ -1118,9 +1118,9 @@ window.__ModuleLoader__.load({
           + ' · ' + (l.summary || '')))
         const unconf = (dd.unconfirmed || []).map((u) => h('div', { key: 'du' + u.kind + u.id, style: C.item },
           badge('inferred'), u.kind + ' · ' + (u.title || u.session_id || u.workspace_id || u.id) + ' · ' + (u.basis || '—')))
-        const sec = (key, title, count, body, emptyText) => h('div', { 'data-section': key },
+        const sec = (key, title, count, body, emptyText, alwaysBody) => h('div', { 'data-section': key },
           h('div', { style: C.groupHead }, title + ' · ' + count),
-          count === 0 ? h('div', { style: C.empty }, emptyText) : body)
+          count === 0 ? h('div', null, h('div', { style: C.empty }, emptyText), alwaysBody ? body : null) : body)
         return h('div', { style: C.detail, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
           h('div', { style: Object.assign({}, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }, C.detailFull) },
             h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
@@ -1214,13 +1214,6 @@ window.__ModuleLoader__.load({
                     )),
                   )
                 : null,
-              p.status !== 'deleted'
-                ? h('button', {
-                    type: 'button', style: C.pickBtn,
-                    'data-action': 'ask-add-deliverable', 'data-for': p.id,
-                    onClick: () => { setDlErr(null); setDlDone(null); setDlForm({ title: '', path: '', kind: 'doc', is_final: false }); setDeliverableAsk({ project_id: p.id, mode: 'form' }) },
-                  }, '加交付物')
-                : null,
               // 解除确认就地显示
               dlUnlinkAsk && dlUnlinkAsk.project_id === p.id
                 ? h('div', { style: Object.assign({}, C.notice, C.warn), 'data-unlink-deliverable-confirm': '1' },
@@ -1230,7 +1223,17 @@ window.__ModuleLoader__.load({
                     h('button', { type: 'button', style: C.pickBtn, onClick: () => setDlUnlinkAsk(null) }, '取消'))
                 : null,
             ),
-            '还没有交付物。点「加交付物」登记一个（只存索引，文件不动）。'),
+            '还没有交付物。点「加交付物」登记一个（只存索引，文件不动）。'), true,
+          // 0.14.2：加交付物按钮独立渲染，不放 sec 的 body（count=0 时空态会替换掉整个 body）。
+          p.status !== 'deleted'
+            ? h('div', { style: { marginTop: '6px' } },
+                h('button', {
+                  type: 'button', style: C.pickBtn,
+                  'data-action': 'ask-add-deliverable', 'data-for': p.id,
+                  onClick: () => { setDlErr(null); setDlDone(null); setDlForm({ title: '', path: '', kind: 'doc', is_final: false }); setDeliverableAsk({ project_id: p.id, mode: 'form' }) },
+                }, '加交付物'),
+              )
+            : null,
           sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
           h('div', { style: C.detailFull },
