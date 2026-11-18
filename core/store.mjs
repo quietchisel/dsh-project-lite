@@ -581,18 +581,25 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       const basisText = String(basis)
 
       if (existing) {
-        const same = existing.project_id === project_id
+        // 字段全同：幂等返回（不因 unlinked 而变）
+        const sameFields = existing.project_id === project_id
           && existing.session_id === session_id
           && existing.role === role
           && existing.confidence === confidence
           && existing.basis === basisText
           && existing.source === source
-          && !existing.unlinked
-        if (same) return decorateLink(existing, false)
-        if (expected_rev === undefined) {
+        if (sameFields && !existing.unlinked) return decorateLink(existing, false)
+        /**
+         * 复活（0.12 契约）：解除过关联的记录，字段没变、只是被软标记了 →
+         * 重新关联必须能直接复活，不能因为"内容变了"就要 expected_rev。
+         * 界面拿不到 unlinked 记录的 rev（列表里看不到它），要求 rev 等于把复活这条路堵死。
+         * 只有**真的改内容**（角色/依据/来源变了）才要 expected_rev。
+         */
+        const reviveOnly = sameFields && existing.unlinked === true
+        if (!reviveOnly && expected_rev === undefined) {
           throw new StoreError('EXPECTED_REV_REQUIRED', '同一确定性键的内容发生变化时必须提供 expected_rev（不允许无条件覆盖）', { id, actual_rev: existing.rev })
         }
-        if (existing.rev !== expected_rev) {
+        if (!reviveOnly && existing.rev !== expected_rev) {
           throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + existing.rev, { expected_rev, actual: existing.rev })
         }
         const next = { ...existing, role, confidence, basis: basisText, source, rev: existing.rev + 1 }
@@ -766,14 +773,16 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       const pathText = typeof workspace_path === 'string' ? workspace_path : undefined
 
       if (existing) {
-        const same = existing.project_id === project_id && existing.workspace_id === workspace_id
+        const sameFields = existing.project_id === project_id && existing.workspace_id === workspace_id
           && existing.workspace_title === titleText && existing.workspace_path === pathText
-          && existing.confidence === confidence && existing.basis === basisText && !existing.unlinked
-        if (same) return { ...existing, changed: false }
-        if (expected_rev === undefined) {
+          && existing.confidence === confidence && existing.basis === basisText
+        if (sameFields && !existing.unlinked) return { ...existing, changed: false }
+        // 复活路径同会话关联：字段没变、只是被软标记 → 允许直接复活，不要 expected_rev
+        const reviveOnly = sameFields && existing.unlinked === true
+        if (!reviveOnly && expected_rev === undefined) {
           throw new StoreError('EXPECTED_REV_REQUIRED', '同一确定性键内容变化时必须提供 expected_rev', { id, actual_rev: existing.rev })
         }
-        if (existing.rev !== expected_rev) {
+        if (!reviveOnly && existing.rev !== expected_rev) {
           throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + existing.rev, { expected_rev, actual: existing.rev })
         }
         const next = { ...existing, workspace_title: titleText, workspace_path: pathText, confidence, basis: basisText, rev: existing.rev + 1 }

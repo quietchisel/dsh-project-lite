@@ -115,10 +115,13 @@ if (linkFile) {
 }
 push('W7', !!linkFile && softMarked, '关联记录物理仍在、带 unlinked 软标记')
 
-// ---- W8 重新关联复活 ----
-r = await call(R, LINK_WORKSPACE_PATH, { method: 'POST', json: { project_id: pid, workspace_id: WS_A, workspace_title: '夹具工作区甲', workspace_path: 'D:\\夹具\\工作区甲', basis: '夹具关联', expected_rev: revW + 1 } })
+// ---- W8 重新关联复活（**不带 expected_rev**：界面拿不到 unlinked 记录的 rev） ----
+r = await call(R, LINK_WORKSPACE_PATH, { method: 'POST', json: { project_id: pid, workspace_id: WS_A, workspace_title: '夹具工作区甲', workspace_path: 'D:\\夹具\\工作区甲', basis: '夹具关联' } })
 det = await call(R, READ_PATHS.get, { query: 'id=' + encodeURIComponent(pid) })
-push('W8', r.status === 200 && det.body.workspaces.length === 1, '重新关联后工作区复活')
+push('W8', r.status === 200 && det.body.workspaces.length === 1, '重新关联后工作区复活（不带 expected_rev 也能复活）')
+// 复活宽松 ≠ 允许静默覆盖：真的改内容仍要 rev
+r = await call(R, LINK_WORKSPACE_PATH, { method: 'POST', json: { project_id: pid, workspace_id: WS_A, workspace_title: '夹具工作区甲', workspace_path: 'D:\\夹具\\工作区甲', basis: '换了依据' } })
+push('W8b', r.status === 400 && /EXPECTED_REV_REQUIRED/.test(JSON.stringify(r.body)), '改内容（换依据）仍要 expected_rev（' + r.status + '）')
 
 const logs = await readLogs()
 push('W9', logs.some(l => l.op === 'link' && l.target_table === 'project_workspace') && logs.some(l => l.op === 'unlink' && l.target_table === 'project_workspace'),

@@ -110,7 +110,15 @@ push('S3', d2.counts.tasks === 1
   && (d2.deliverables || []).some((x) => x.id === DLV(3))
   && !(d2.deliverables || []).some((x) => x.id === DLV(1) || x.id === DLV(2)),
   '交付物跟着任务走：跟随会话那两条任务的交付物离开，只剩钉住任务的 + 直挂的（' + (d2.deliverables || []).length + ' 条）')
-await s.linkSession({ project_id: pid, session_id: SID, role: 'primary', basis: 'S31 重新关联', confidence: 'confirmed', expected_rev: 2 })
+// 0.15.2：复活不需要 expected_rev（界面拿不到 unlinked 记录的 rev，要求它等于堵死复活）
+await s.linkSession({ project_id: pid, session_id: SID, role: 'primary', basis: 'S31 夹具', confidence: 'confirmed' })
+const revived = s.links().find((l) => l.session_id === SID && l.project_id === pid)
+push('R1', !!revived && revived.unlinked !== true && revived.rev === 3,
+  '解绑后重新关联：不带 expected_rev 也能复活（unlinked 已清、rev=' + (revived && revived.rev) + '）')
+let e3 = null
+try { await s.linkSession({ project_id: pid, session_id: SID, role: 'supporting', basis: '改了角色', confidence: 'confirmed' }) } catch (x) { e3 = x }
+push('R2', e3 && e3.code === 'EXPECTED_REV_REQUIRED',
+  '真的改内容（换角色）仍然要 expected_rev（复活宽松 ≠ 允许静默覆盖）')
 const d3 = await svc.getProject(pid)
 push('S4', d3.counts.tasks === 3, '重新关联后，跟随会话的 2 条自动回来（' + d3.counts.tasks + ' 条）')
 push('S5', d3.counts.tasks_stale === 0 && (d3.tasks || []).every((t) => t.evidence_stale === false),
