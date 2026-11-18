@@ -155,8 +155,16 @@ export function createReadService(store, options = {}) {
     if (registry && typeof registry.snapshot === 'function') {
       try { snap = await registry.snapshot() } catch { snap = null }
     }
+    // 0.15.1 修：titlesOf 返回的是 Map，原来写成 map[session_id]（对象下标），
+    // Map 上永远是 undefined → 标题一次都没注入成功，界面一直回落成「会话 + id」。
+    // 同时兼容 Map 与普通对象，免得以后换实现再踩一次。
+    const titleOfId = (id) => {
+      if (!map) return null
+      if (typeof map.get === 'function') return map.get(id) || null
+      return map[id] || null
+    }
     return links.map((l) => {
-      const t = map && map[l.session_id]
+      const t = titleOfId(l.session_id)
       const row = snap && snap.ok && snap.byId.get(l.session_id)
       const ws = row && row.workspace_title
       const extra = {}

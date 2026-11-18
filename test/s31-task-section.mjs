@@ -119,6 +119,22 @@ push('S5', d3.counts.tasks_stale === 0 && (d3.tasks || []).every((t) => t.eviden
 const raw = s.tasks().filter((t) => t.project_id)
 push('S6', raw.length === 1 && raw[0].id === T(3),
   '库里只存人工钉住的归属，跟随会话的不落库（' + raw.length + ' 条）')
+
+// ---- 会话标题注入：titlesOf 返回 Map 时必须取得到（0.15.1 修的真 bug） ----
+{
+  const svcMap = createReadService(s, { titlesOf: async (ids) => new Map(ids.map((i) => [i, '来自 Map 的标题'])) })
+  const dMap = await svcMap.getProject(pid)
+  push('N1', dMap.sessions.length === 1 && dMap.sessions[0].title === '来自 Map 的标题',
+    'titlesOf 返回 Map 时标题能注入（原来写成 map[id]，Map 上永远 undefined → 界面回落成「会话 + id」）')
+  const svcObj = createReadService(s, { titlesOf: async (ids) => Object.fromEntries(ids.map((i) => [i, '来自对象的标题'])) })
+  const dObj = await svcObj.getProject(pid)
+  push('N2', dObj.sessions[0] && dObj.sessions[0].title === '来自对象的标题',
+    'titlesOf 返回普通对象也兼容（不绑死一种实现）')
+  const svcNone = createReadService(s, { titlesOf: async () => new Map() })
+  const dNone = await svcNone.getProject(pid)
+  push('N3', dNone.sessions[0] && dNone.sessions[0].title === undefined,
+    '读不到标题时不编造：字段不出现（前端自己回落成 id）')
+}
 await s.close()
 
 // ---- 前端静态断言 ----
