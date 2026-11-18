@@ -14,7 +14,26 @@
  * 这样 Node 层可用假 defineTool 测 execute 逻辑，真实 Host 传官方 defineTool。
  */
 
+import { resolveHostSessionId, runAsCaller } from './identity.mjs'
+
 const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create']
+
+/**
+ * 唯一身份来源：宿主 exec。写入类工具一律包在 runAsCaller 里，
+ * 这样 Store 侧拿到的身份与工具参数完全无关（参数里的 actor / __identity 会被直接拒绝）。
+ */
+const callerSid = (exec) => resolveHostSessionId(exec)
+
+/**
+ * 写工具入口的“参数洁净”检查：身份类字段一律不许出现在业务参数里。
+ * 工具会把参数重建成白名单对象，所以不拦就变成“静默忽略”——忽略虽然安全，但调用方会误以为
+ * 自己的 actor 生效了。这里直接报错，语义明确。
+ */
+const FORBIDDEN_ARG_KEYS = ['actor', '__identity', '_identity', 'identity', 'auth', 'authorization']
+function spoofedArgKey(args) {
+  if (!args || typeof args !== 'object') return null
+  return FORBIDDEN_ARG_KEYS.find((k) => Object.prototype.hasOwnProperty.call(args, k)) || null
+}
 export { TOOL_NAMES }
 
 /** 态度词黑名单：next_action 必须是动作，不是态度（与 util.mjs / 路由层同口径）。 */
@@ -94,7 +113,7 @@ export function registerAgentTools(ctx, deps) {
     parameters: { session_id: { type: 'string', description: '会话 id；省略=当前调用会话' } },
     output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
     async execute(args, exec) {
-      const sid = (args && args.session_id) || (exec && exec.agent && exec.agent.sessionId) || (exec && exec.agent && exec.agent.id)
+      const sid = (args && args.session_id) || callerSid(exec)
       if (!sid) return { ok: false, error: 'SESSION_ID_REQUIRED', message: '没有 session_id，且当前调用不在会话里' }
       const s = await getStore()
       await s.refresh()
@@ -115,8 +134,14 @@ export function registerAgentTools(ctx, deps) {
     },
     output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
     async execute(args, exec) {
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '写工具不接受身份字段：' + spoof }
       if (!args || !args.project_id) return { ok: false, error: 'PROJECT_ID_REQUIRED' }
-      const sid = args.session_id || (exec && exec.agent && exec.agent.sessionId) || (exec && exec.agent && exec.agent.id)
+      const hostSid = callerSid(exec)
+      // 目标会话：显式参数优先（把**别的**会话挂进来），否则就是当前会话。
+      // 注意：这只决定“挂谁”，不决定“谁有权限”——权限永远看 hostSid。
+      const sid = args.session_id || hostSid
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主注入的会话身份，拒绝写入' }
       if (!sid) return { ok: false, error: 'SESSION_ID_REQUIRED' }
       const basis = String(args.basis ?? '').trim()
       if (!basis) return { ok: false, error: 'BASIS_REQUIRED', message: 'basis 必填：写清为什么挂到这里' }
@@ -125,7 +150,8 @@ export function registerAgentTools(ctx, deps) {
       const s = await getStore()
       if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
       try {
-        const r = await s.linkSession({ project_id: args.project_id, session_id: sid, role, basis, confidence: 'confirmed' })
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:link' }, () =>
+          s.linkSession({ project_id: args.project_id, session_id: sid, role, basis, confidence: 'confirmed' }))
         if (evidence) evidence({ phase: 'tool-link', project: args.project_id, session: sid, changed: r.changed })
         return { ok: true, changed: r.changed !== false, project_id: args.project_id, session_id: sid, rev: r.rev ?? null }
       } catch (e) {
@@ -147,6 +173,8 @@ export function registerAgentTools(ctx, deps) {
     },
     output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
     async execute(args, exec) {
+      const spoof2 = spoofedArgKey(args)
+      if (spoof2) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '写工具不接受身份字段：' + spoof2 }
       if (!args) return { ok: false, error: 'INVALID_INPUT' }
       const name = String(args.name ?? '').trim()
       const objective = String(args.objective ?? '').trim()
@@ -156,13 +184,13 @@ export function registerAgentTools(ctx, deps) {
       if (objective.length === 0) return { ok: false, error: 'INVALID_INPUT', message: '目标必填' }
       const s = await getStore()
       if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
-      const sid = exec && exec.agent && (exec.agent.sessionId || exec.agent.id)
+      const hostSid = callerSid(exec)
       try {
-        const r = await s.createProject({
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:create' }, () => s.createProject({
           name, objective, next_action: String(args.next_action).trim(),
           done_when: args.done_when ? [String(args.done_when).trim()] : undefined,
-          session_id: sid, basis: '用户明确要求建项目', confidence: 'confirmed',
-        })
+          session_id: hostSid, basis: '用户明确要求建项目', confidence: 'confirmed',
+        }))
         if (evidence) evidence({ phase: 'tool-create', name, id: r && r.project && r.project.id })
         return { ok: true, project: r && r.project ? { id: r.project.id, name: r.project.name, rev: r.project.rev } : null }
       } catch (e) {

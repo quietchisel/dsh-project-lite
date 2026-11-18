@@ -7,7 +7,7 @@
  *   - **真幂等**：同一条重复点 3 次 → changed=false，rev 仍 1，changelog 不增，基线不动，零写盘
  *   - 负例：会话不在注册表 → 400 SESSION_NOT_FOUND，且一个字节都不写
  *   - 负例：缺 project_id / session_id → 400；role 非法 → 400；GET → 405；非 JSON → 415
- *   - 对账第 3 条：会话都在 → pass（9/0/0）；会话被删 → fail 但**不降级**；注册表读不到 → skipped（不报 pass）
+ *   - 对账第 3 条：会话都在 → pass（10/0/0；第 10 条是 S1-B 新增的 PROJECT_PRIMARY_CONFLICT）；会话被删 → fail 但**不降级**；注册表读不到 → skipped（不报 pass）
  *
  * 如实标注：Node 层跑假 webServer + 真存储后端 + 真注册表读取，没有真实 Host / Desktop，
  * 按状态矩阵 v2 规则 1/3，成果最高算 Implemented。
@@ -185,7 +185,9 @@ push('S21', diffSnapshot(snapNeg, snapNegAfter).length === 0, '四个负例之�
 r = await call(routes, STATE_PATH, { query: 'reconcile=1' })
 const c3 = (r.body.reconcile.checks || []).find((c) => c.id === 3)
 push('S22', c3 && c3.status === 'pass', '会话都在 → 第 3 条 pass（' + (c3 && c3.detail) + '）')
-push('S23', r.body.reconcile.pass === 9 && r.body.reconcile.fail === 0 && r.body.reconcile.skipped === 0, '9/0/0（pass=' + r.body.reconcile.pass + ' fail=' + r.body.reconcile.fail + ' skipped=' + r.body.reconcile.skipped + '）')
+// S1-B：对账新增第 10 条（PROJECT_PRIMARY_CONFLICT），通过数由 9 变 10
+// S1-C：对账新增第 11 条（task.project_id 有效），通过数再由 10 变 11
+push('S23', r.body.reconcile.pass === 11 && r.body.reconcile.fail === 0 && r.body.reconcile.skipped === 0, '11/0/0（pass=' + r.body.reconcile.pass + ' fail=' + r.body.reconcile.fail + ' skipped=' + r.body.reconcile.skipped + '）')
 
 // ---- S6 会话被删：第 3 条 fail，但不降级 ----
 await writeFile(join(ROOT, 'workspace.json'), JSON.stringify(workspaceDoc([SID_B])), 'utf8')

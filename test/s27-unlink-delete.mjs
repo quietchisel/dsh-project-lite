@@ -70,7 +70,8 @@ push('G1', r.status === 200 && !!r.body.project?.id, '建项目 ' + r.body.proje
 const pid = r.body.project.id
 r = await call(R, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID_A, basis: '夹具A' } })
 push('G2', r.status === 200 && r.body.ok, '挂会话A')
-r = await call(R, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID_B, basis: '夹具B' } })
+// S1-B：同一 Project 只能有一个有效 primary；追加会话用 supporting
+r = await call(R, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: SID_B, role: 'supporting', basis: '夹具B' } })
 push('G3', r.status === 200 && r.body.ok, '挂会话B')
 
 // 会话A关联记录的 rev（从详情拿）

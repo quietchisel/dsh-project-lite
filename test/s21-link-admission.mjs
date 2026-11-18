@@ -101,7 +101,8 @@ push('A5', diffSnapshot(snapBefore, snapAfter).length === 0, '两个拒绝场景
 
 // 5 注册表读不到 → 放行但标 registryChecked=false
 await rename(join(ROOT, 'workspace.json'), join(ROOT, 'workspace.json.moved'))
-r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: 'session-88888888-8888-8888-8888-888888888888', basis: 'S21' } })
+// S1-B：一个 Project 只能有一个有效 primary，第二个会话必须用 supporting
+r = await call(routes, LINK_PATH, { method: 'POST', json: { project_id: pid, session_id: 'session-88888888-8888-8888-8888-888888888888', role: 'supporting', basis: 'S21' } })
 push('A6', r.status === 200 && r.body.registryChecked === false, '注册表读不到 → 放行但 registryChecked=false（不假装校验过）')
 
 const links = await readdir(join(ROOT, 'project', 'project_session'))

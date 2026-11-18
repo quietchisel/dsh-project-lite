@@ -66,13 +66,13 @@ push('T8', g1.ok === true && g1.found === true && g1.project.name === '工具建
 const g2 = await get.execute({})
 push('T9', g2.ok === false && g2.error === 'PROJECT_ID_REQUIRED', 'project_get 缺 id 返回明确错误')
 
-// 关联当前会话（写工具，exec 提供 session）
-// create 已自动把当前会话挂上，这里用另一个会话做「首次」
+// 关联会话（写工具，exec 提供 session）
+// create 已自动把当前会话挂上（primary）；这里由 primary 把「另一个会话」挂成 supporting。
+// 注意：S1-A 之后写工具要求调用方是该项目 primary，所以不能用 SID2 当调用方（那是越权，见 S1-A P2/P3）。
 const SID2 = 'session-11223344-5566-7788-99aa-bbccddeeff00'
-const exec2 = { agent: { sessionId: SID2 }, signal: undefined }
-const l1 = await link.execute({ project_id: pid, role: 'supporting', basis: '第二个会话验证关联工具' }, exec2)
+const l1 = await link.execute({ project_id: pid, session_id: SID2, role: 'supporting', basis: '第二个会话验证关联工具' }, exec)
 push('T10', l1.ok === true && l1.changed === true, 'link 新会话首次关联 changed=true')
-const l2 = await link.execute({ project_id: pid, role: 'supporting', basis: '第二个会话验证关联工具' }, exec2)
+const l2 = await link.execute({ project_id: pid, session_id: SID2, role: 'supporting', basis: '第二个会话验证关联工具' }, exec)
 push('T11', l2.ok === true && l2.changed === false, 'link 重复关联 changed=false（幂等）')
 const l3 = await link.execute({ project_id: pid, role: 'primary', basis: '' }, exec)
 push('T12', l3.ok === false && l3.error === 'BASIS_REQUIRED', 'link 缺 basis 被拒')

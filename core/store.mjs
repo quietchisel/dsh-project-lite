@@ -5,10 +5,16 @@
  * 所有写入口先过完整性闸（guard.writable），降级时抛 READONLY_DEGRADED —— 不是只把按钮藏起来。
  */
 import { mkdir } from 'node:fs/promises'
+import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { buildSpec, TABLES, VERSION, MetaSchema } from './spec.mjs'
+import { buildSpec, TABLES, VERSION, MetaSchema, initialMeta } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
 import { newProjectId, newDeliverableId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
+import { createJournal, fingerprintOf, canon, STATES as JOURNAL_STATES } from './journal.mjs'
+import { assertNoSpoofedActor, authorizeWrite, callerContext } from './identity.mjs'
+import { crashPoint, pausePoint } from './fault.mjs'
+import { validateAttributionTarget } from './attribution.mjs'
 
 /**
  * done_when 归一化：表单只给一个输入框（字符串），schema 要的是 string[]。
@@ -49,7 +55,11 @@ function decorateLink(record, changed) {
  *   给了就**不再自己 new 后端、也不再 import @deepseek-ai/* 包**——这条是为了让自制插件不依赖
  *   peer 解析（S1.0 遗留问题 B-2），同时避免 close 时把别人的域一起关掉。
  */
-export async function openStore({ root, facility: injectedFacility, actor = 's0-harness', writer = 'dsh-project-core@0.1.0-s0', version = VERSION, compatibleVersions, extraProject } = {}) {
+export async function openStore({ root, facility: injectedFacility, actor = 's0-harness', writer = 'dsh-project-core@0.1.0-s0', version = VERSION, compatibleVersions, extraProject, mode = 'rw', sessionId = null, enforceIdentity = false, journal: journalEnabled = true, strictRev = false } = {}) {
+  // 只读模式：绝不 mkdir、绝不建域、绝不写 global；只读磁盘。T41 用文件哈希前后比对验证。
+  if (mode === 'read') {
+    return openStoreReadOnly({ root, writer, version, compatibleVersions, extraProject })
+  }
   await mkdir(root, { recursive: true })
   const spec = buildSpec({ version, compatibleVersions, writer, extraProject })
   const acceptedVersions = [spec.version, ...(spec.compatibleVersions ?? [])]
@@ -80,6 +90,10 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   }
   const domain = await facility.open(spec)
   let scanAfter = await safeScan()
+
+  // S1-A：操作日志。所有业务写都走 withOp → journal（PREPARED/APPLYING/COMMITTED）。
+  const journal = journalEnabled ? createJournal({ root }) : null
+  let currentOp = null
 
   const meta0 = domain.global.get()
   const expected = meta0.expected_counts ?? null
@@ -247,8 +261,223 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     const cur = meta()
     const next = fn({ ...cur, prefs: { ...cur.prefs } })
     const parsed = MetaSchema.parse(next)
-    await domain.global.set(parsed)
+    await dview.global.set(parsed)
     return parsed
+  }
+
+  // ---------- S1-A：写缓冲 + 覆盖读 ----------
+  // 一次操作里的所有写先记成 step（含 before/after），跑完再一次性落盘。
+  // 这样 journal 里保存的是**完整计划**，恢复时能前滚到终点，而不是只知道“写到哪算哪”。
+  let overlay = null // Map<'table:key'| 'global', value>
+  const dview = {
+    global: {
+      get: () => (overlay && overlay.has('global') ? overlay.get('global') : domain.global.get()),
+      set: async (v) => {
+        // 元数据写也进计划：崩溃后能一并前滚，不会出现“业务写了基线没跟上”。
+        if (!currentOp) { await domain.global.set(v); return }
+        recordGlobalStep(v)
+      },
+    },
+    table: (tName) => ({
+      get: (k) => (overlay && overlay.has(tName + ':' + k) ? overlay.get(tName + ':' + k) : domain.table(tName).get(k)),
+      entries: () => {
+        if (!overlay) return domain.table(tName).entries()
+        const m = new Map(domain.table(tName).entries())
+        for (const [k, v] of overlay) { const p = k.split(':'); if (p[0] === tName) m.set(p[1], v) }
+        return m.entries()
+      },
+      get size() {
+        if (!overlay) return domain.table(tName).size
+        let n = domain.table(tName).size
+        for (const k of overlay.keys()) { const p = k.split(':'); if (p[0] === tName && !domain.table(tName).get(p[1])) n++ }
+        return n
+      },
+      put: async (k, v) => { throw new StoreError('USE_PUTJ', '业务写必须走 putJ（直接 put 会绕过 journal）') },
+      delete: async () => { throw new StoreError('NO_PHYSICAL_DELETE', '域层禁止物理删除（错误账本 E-10）') },
+    }),
+  }
+
+  function recordGlobalStep(v) {
+    const j = currentOp
+    const idx = j.j.steps.findIndex((s) => s.kind === 'global')
+    const step = { kind: 'global', table: 'global', key: 'global', before_exists: true, before: j.j.steps[idx]?.before ?? domain.global.get(), after: v }
+    if (idx >= 0) j.j.steps[idx] = step; else j.j.steps.push(step)
+    overlay.set('global', v)
+  }
+
+  // ---------- S1-A 操作日志（Operation Journal） ----------
+  const stepIO = {
+    readStep(step) {
+      if (step.kind === 'global') return domain.global.get()
+      const tb = domain.table(step.table)
+      if (!tb) return null
+      const rec = tb.get(step.key)
+      return rec === undefined ? null : rec
+    },
+    async writeStep(step) {
+      // 恢复执行器直接写真域：它不得走 dview/withOp，否则就是递归进 journal。
+      if (step.kind === 'global') { await domain.global.set(MetaSchema.parse(step.after)); return }
+      await domain.table(step.table).put(step.key, step.after)
+    },
+  }
+
+  /** 业务写只进计划（内存 + journal），不落盘；真正落盘由 applyPlan 统一做。 */
+  async function putJ(table, key, record) {
+    if (!currentOp) { await domain.table(table).put(key, record); return }
+    const before = currentOp.overlay.has(table + ':' + key) ? currentOp.overlay.get(table + ':' + key) : domain.table(table).get(key)
+    const step = {
+      kind: 'record', table, key,
+      before_exists: before !== undefined,
+      before: before === undefined ? null : before,
+      after: record,
+      // 不可逆标记与业务事实写在**同一份计划**里，且计划先于任何业务落盘。
+      ...(table === 'changelog' ? { irreversible: true, irreversible_reason: 'changelog 是 append-only 审计证据' } : {}),
+    }
+    currentOp.j.steps.push(step)
+    currentOp.overlay.set(table + ':' + key, record)
+  }
+
+  /** 把计划真正写到磁盘：逐步落盘 + 进度游标；崩溃后 recover 按同一计划前滚。 */
+  async function applyPlan(j) {
+    for (const step of j.steps) {
+      crashPoint('step-recorded')
+      crashPoint('step-recorded-' + step.table)
+      await stepIO.writeStep(step)
+      crashPoint('record-written')
+      crashPoint('record-written-' + step.table)
+      await pausePoint('record-written')
+      j.completed_steps.push({ table: step.table, key: step.key })
+      j.updated_at = nowIso()
+      currentOp.flush()
+      crashPoint('step-completed')
+    }
+  }
+  /** replayed 用不可枚举属性挂上去：调用方能读，但不进 JSON、不改既有返回形状。 */
+  function markReplayed(value, flag) {
+    if (value && typeof value === 'object') {
+      try { Object.defineProperty(value, 'replayed', { value: flag, enumerable: false, configurable: true }) } catch {}
+    }
+    return value
+  }
+
+  function resultRefOf(value) {
+    if (!value || typeof value !== 'object') return null
+    const obj = value.project && typeof value.project === 'object' ? value.project : value
+    return typeof obj.id === 'string' ? 'record:' + obj.id : null
+  }
+
+  /**
+   * 一次业务写 = 一个操作。同一 client_request_id 重放：返回原结果、零副作用；指纹不同则拒。
+   * 嵌套调用（createProject 里调 linkSession）不新开操作，属于同一 journal。
+   */
+  async function withOp(name, args, fn) {
+    if (currentOp) return fn()
+    if (!journal) return fn()
+    assertNoSpoofedActor(args)
+    const crid = args && args.client_request_id ? String(args.client_request_id) : null
+    const clean = { ...(args || {}) }
+    delete clean.client_request_id
+    delete clean.manual
+    const fp = fingerprintOf(name, clean)
+    // 身份只来自调用方上下文（runAsCaller）或 openStore 显式注入；绝不从 args 取。
+    const caller = callerContext()
+    const effectiveSession = (caller && caller.sessionId) || sessionId
+    const enforce = (caller && caller.enforce === true) || enforceIdentity
+    if (enforce) {
+      const pid = projectIdOf(name, args)
+      if (pid) {
+        store.lastAuthorization = authorizeWrite({ links: store.links(), projectId: pid, sessionId: effectiveSession, op: name, manual: args && args.manual })
+      } else if (name === 'createProject' && !effectiveSession && !(args && args.manual && args.manual.authorized === true)) {
+        authorizeWrite({ links: [], projectId: null, sessionId: effectiveSession, op: name })
+      }
+    }
+    const lock = await journal.acquire()
+    let j = null
+    try {
+      const begun = await journal.begin({ client_request_id: crid, fingerprint: fp, op: name, actor, session_id: sessionId, writer: stepIO })
+      if (begun.replayed) return markReplayed(begun.result, true)
+      j = begun.journal
+      currentOp = { j, overlay: new Map(), flush: () => journal.writeJsonAtomic(journal.opPath(j), j) }
+      overlay = currentOp.overlay
+      // 阶段一：在内存里把这次操作要写的**全部**记录算出来（不碰磁盘）。
+      const value = await fn()
+      if (!crid && (j.steps || []).length === 0 && value && value.changed === false) {
+        // 无 client_request_id 且真的零改动：不留 journal 文件，保住“重复点一次零写盘”。
+        currentOp = null
+        overlay = null
+        try { unlinkSync(journal.opPath(j)) } catch {}
+        return value
+      }
+      // 阶段二：完整计划先落盘（APPLYING），再逐条写业务记录；崩溃后按同一计划前滚。
+      j.state = JOURNAL_STATES.APPLYING
+      j.updated_at = nowIso()
+      currentOp.flush()
+      crashPoint('plan-written')
+      await applyPlan(j)
+      crashPoint('pre-commit')
+      j.state = JOURNAL_STATES.COMMITTED
+      j.result = value === undefined ? null : JSON.parse(JSON.stringify(value))
+      j.result_ref = resultRefOf(value)
+      j.updated_at = nowIso()
+      currentOp.flush()
+      crashPoint('post-commit')
+      currentOp = null
+      overlay = null
+      return markReplayed(value, false)    } catch (e) {
+      if (j) {
+        // 走到这里说明还没开始 applyPlan（业务零落盘）：计划作废，删掉 journal。
+        // 若是在 applyPlan 中途抛错，则由 recover 前滚——那时 j.state 已经是 APPLYING。
+        if (j.state !== JOURNAL_STATES.APPLYING) {
+          try { unlinkSync(journal.opPath(j)) } catch {}
+        } else {
+          j.state = JOURNAL_STATES.FAILED_RETRYABLE
+          j.error = { code: e && e.code ? e.code : 'ERROR', message: String(e && e.message ? e.message : e) }
+          j.updated_at = nowIso()
+          try { journal.writeJsonAtomic(journal.opPath(j), j) } catch {}
+        }
+      }
+      throw e
+    } finally {
+      currentOp = null
+      overlay = null
+      lock.release()
+    }
+  }
+
+  function projectIdOf(name, args) {
+    if (!args) return null
+    if (args.project_id) return args.project_id
+    if (name === 'archiveProject' || name === 'restoreProject' || name === 'deleteProject') return args.id || null
+    if (name === 'unlinkDeliverable') {
+      const d = dview.table('deliverable').get(args.id)
+      return d ? d.project_id : null
+    }
+    return null
+  }
+
+  /** 某个 project 的**有效** primary（unlinked 不算）。 */
+  function activePrimaryOf(projectId) {
+    return [...dview.table('project_session').entries()]
+      .map(([, v]) => v)
+      .filter((l) => l && l.project_id === projectId && l.role === 'primary' && l.unlinked !== true)
+  }
+
+  /** 读可见性：per-record committed visibility —— APPLYING 期间返回 before / 隐藏新建。 */
+  function visibleRecord(table, key, rec) {
+    if (!journal) return rec
+    const hit = journal.pendingIndex().get('record:' + table + ':' + key)
+    if (!hit) return rec
+    return hit.before_exists ? hit.before : null
+  }
+  function visibleAll(table) {
+    const idx = journal ? journal.pendingIndex() : new Map()
+    const out = []
+    for (const [k, v] of dview.table(table).entries()) {
+      const hit = idx.get('record:' + table + ':' + k)
+      if (hit) { if (hit.before_exists) out.push(hit.before); continue }
+      out.push(v)
+    }
+    return out
   }
 
   /**
@@ -256,7 +485,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
    * 再加一道：meta 本身不可信（缺失/损坏/版本不兼容）时**一个字节都不写**。
    */
   async function refreshBaseline() {
-    const counts = Object.fromEntries(TABLES.map(t => [t, domain.table(t).size]))
+    const counts = Object.fromEntries(TABLES.map(t => [t, dview.table(t).size]))
     if (!verdict.metaSafeToWrite) return counts
     if (verdict.writable) {
       await patchMeta(m => ({ ...m, schema_version: spec.version, created_at: m.created_at || nowIso(), expected_counts: counts }))
@@ -266,16 +495,17 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     return counts
   }
 
-  async function writeLog(op, targetTable, targetKey, summary, beforeRev, afterRev, source = 'manual') {
+  async function writeLog(op, targetTable, targetKey, summary, beforeRev, afterRev, source = 'manual', extra = null) {
     const id = newLogId()
     const rec = {
       id, at: nowIso(), actor, op, target_table: targetTable, target_key: targetKey,
       summary, before_rev: beforeRev ?? null, after_rev: afterRev ?? null,
       // 1.9：现在所有写入口都是人点的（manual）；runner 接进来后由它传 'run'。
       source,
+      ...(extra && typeof extra === 'object' ? extra : {}),
     }
     assertRecord('changelog', rec)
-    await domain.table('changelog').put(id, rec)
+    await putJ('changelog', id, rec)
   }
 
   Object.assign(store, {
@@ -301,7 +531,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (tg) record.tags = tg.slice(0, 3)
       if (legacy_refs) record.legacy_refs = legacy_refs
       assertRecord('project', record)
-      await domain.table('project').put(id, record)
+      await putJ('project', id, record)
       let link = null
       if (session_id) {
         link = await store.linkSession({ project_id: id, session_id, role: 'primary', basis: record.basis, confidence, source: 'manual' })
@@ -333,10 +563,21 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
      */
     async linkSession({ project_id, session_id, role = 'primary', basis, confidence = 'confirmed', source = 'manual', expected_rev }) {
       assertWritable()
-      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!dview.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
       if (!basis || !String(basis).trim()) throw new StoreError('BASIS_REQUIRED', 'basis 必填')
+      const proj = dview.table('project').get(project_id)
+      if (proj && proj.status === 'deleted') {
+        throw new StoreError('PROJECT_DELETED', '项目在回收站（status=deleted），不允许新增或改写会话角色', { project_id })
+      }
+      // P0：一个 Project 最多一个有效 primary（unlinked 的历史记录不计入）
+      if (role === 'primary') {
+        const other = activePrimaryOf(project_id).filter((l) => l.session_id !== session_id)
+        if (other.length > 0) {
+          throw new StoreError('PROJECT_PRIMARY_CONFLICT', '该项目的有效 primary 已是 ' + other[0].session_id + '，不能再加一个 primary（要换请用 transferPrimary）', { project_id, existing: other.map((l) => l.session_id) })
+        }
+      }
       const id = linkKey(project_id, session_id)
-      const existing = domain.table('project_session').get(id)
+      const existing = dview.table('project_session').get(id)
       const basisText = String(basis)
 
       if (existing) {
@@ -359,7 +600,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         delete next.unlinked
         delete next.unlinked_at
         assertRecord('project_session', next)
-        await domain.table('project_session').put(id, next)
+        await putJ('project_session', id, next)
         await writeLog('link', 'project_session', id, (existing.unlinked ? '重新关联' : '改挂会话') + ' ' + session_id.slice(0, 16) + '… → ' + role, existing.rev, next.rev)
         await refreshBaseline()
         return decorateLink(next, true)
@@ -370,23 +611,34 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         created_at: nowIso(), rev: 1,
       }
       assertRecord('project_session', record)
-      await domain.table('project_session').put(id, record)
+      await putJ('project_session', id, record)
       await writeLog('link', 'project_session', id, '挂会话 ' + session_id.slice(0, 16) + '… → ' + role, null, 1)
       await refreshBaseline()
       return decorateLink(record, true)
     },
 
-    /** 归档：只改一条 project 记录，不动任何子记录。 */
+    /**
+     * 归档：只改一条 project 记录，不动任何子记录。
+     *
+     * R-04：这里以前无条件是“读当前 → 写 archived”，重复归档会把 rev 一路推高（并发下更明显）。
+     * 现在两条规矩：
+     *   1. 已经是 archived → 直接返回 changed=false，零副作用（幂等）。
+     *   2. strictRev 打开时，状态迁移必须带 expected_rev（给迁移/Agent 用；界面默认关，避免破坏现有契约）。
+     */
     async archiveProject(id, { expected_rev } = {}) {
       assertWritable()
-      if (!domain.table('project').get(id)) throw new StoreError('PROJECT_NOT_FOUND', id)
-      const before = domain.table('project').get(id)
+      if (!dview.table('project').get(id)) throw new StoreError('PROJECT_NOT_FOUND', id)
+      const before = dview.table('project').get(id)
+      if (before.status === 'archived') return { ...before, changed: false }
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '状态迁移必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
       const next = { ...before, status: 'archived', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
       assertRecord('project', next)
-      await domain.table('project').put(id, next)
+      await putJ('project', id, next)
       await writeLog('archive', 'project', id, '归档（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
@@ -398,8 +650,11 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
      */
     async restoreProject(id, { expected_rev } = {}) {
       assertWritable()
-      const before = domain.table('project').get(id)
+      const before = dview.table('project').get(id)
       if (!before) throw new StoreError('PROJECT_NOT_FOUND', id)
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '状态迁移必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       // 0.12：恢复同时服务「归档」与「软删除回收站」两种状态。
       if (before.status !== 'archived' && before.status !== 'deleted') {
         throw new StoreError('NOT_ARCHIVED', '项目不是归档/回收站状态，无需恢复（当前 ' + before.status + '）')
@@ -409,10 +664,58 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       }
       const next = { ...before, status: 'active', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
       assertRecord('project', next)
-      await domain.table('project').put(id, next)
+      await putJ('project', id, next)
       await writeLog('restore', 'project', id, (before.status === 'deleted' ? '从回收站恢复' : '恢复归档') + '（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
+    },
+
+    /**
+     * P0：把 primary 从 A 转移到 B（唯一被允许的换主方式）。
+     *
+     * 两条写入（B 升 primary、A 降 supporting）在**同一个 journal 计划**里：
+     *   - 要么都落盘，要么都不落盘；
+     *   - 未提交期间读接口看到的是 before（A 仍是 primary），不会出现“两个 primary 同时可见”；
+     *   - 只写 1 条 changelog（op=update），带 before/after rev。
+     */
+    async transferPrimary({ project_id, to_session_id, basis, confidence = 'confirmed' } = {}) {
+      assertWritable()
+      if (!project_id || !to_session_id) throw new StoreError('INVALID_INPUT', 'project_id / to_session_id 必填')
+      const proj = dview.table('project').get(project_id)
+      if (!proj) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (proj.status === 'deleted') throw new StoreError('PROJECT_DELETED', '项目在回收站，不能转移 primary', { project_id })
+      const all = [...dview.table('project_session').entries()].map(([, v]) => v)
+      const targetId = linkKey(project_id, to_session_id)
+      const target = all.find((l) => l.id === targetId)
+      if (target && target.role === 'primary' && target.unlinked !== true) {
+        return { ...target, changed: false }
+      }
+      const current = all.find((l) => l.project_id === project_id && l.session_id !== to_session_id && l.role === 'primary' && l.unlinked !== true)
+      const now = nowIso()
+      let promoted
+      if (target) {
+        promoted = { ...target, role: 'primary', confidence, rev: target.rev + 1 }
+        if (basis) promoted.basis = String(basis)
+        delete promoted.unlinked
+        delete promoted.unlinked_at
+      } else {
+        if (!basis || !String(basis).trim()) throw new StoreError('BASIS_REQUIRED', '新建 primary 关联必须给 basis')
+        promoted = { id: targetId, project_id, session_id: to_session_id, role: 'primary', confidence, basis: String(basis), source: 'manual', created_at: now, rev: 1 }
+      }
+      assertRecord('project_session', promoted)
+      await putJ('project_session', targetId, promoted)
+      let demoted = null
+      if (current) {
+        demoted = { ...current, role: 'supporting', rev: current.rev + 1 }
+        if (!demoted.basis || !String(demoted.basis).trim()) demoted.basis = 'primary 转移到 ' + to_session_id.slice(0, 16) + '…（自动降级）'
+        assertRecord('project_session', demoted)
+        await putJ('project_session', current.id, demoted)
+      }
+      await writeLog('update', 'project_session', targetId,
+        '转移 primary：' + (current ? current.session_id.slice(0, 16) + '…（降 supporting） → ' : '（无原 primary） → ') + to_session_id.slice(0, 16) + '…（升 primary）',
+        current ? current.rev : null, promoted.rev)
+      await refreshBaseline()
+      return { ...promoted, changed: true, demoted: demoted ? demoted.id : null }
     },
 
     /**
@@ -424,17 +727,20 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     async unlinkSession({ project_id, session_id, expected_rev } = {}) {
       assertWritable()
       if (!project_id || !session_id) throw new StoreError('INVALID_INPUT', 'project_id / session_id 必填')
-      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!dview.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
       const id = linkKey(project_id, session_id)
-      const before = domain.table('project_session').get(id)
+      const before = dview.table('project_session').get(id)
       if (!before) throw new StoreError('LINK_NOT_FOUND', '这条关联不存在：' + id)
       if (before.unlinked) return { ...before, changed: false }  // 幂等：已解除，零副作用
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '解除关联必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
       const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
       assertRecord('project_session', next)
-      await domain.table('project_session').put(id, next)
+      await putJ('project_session', id, next)
       await writeLog('unlink', 'project_session', id, '解除关联 ' + session_id.slice(0, 16) + '…', before.rev, next.rev)
       await refreshBaseline()
       return decorateLink(next, true)
@@ -451,10 +757,10 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspace_id)) {
         throw new StoreError('INVALID_INPUT', 'workspace_id 必须是 36 位 uuid：' + workspace_id)
       }
-      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!dview.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
       if (!basis || !String(basis).trim()) throw new StoreError('BASIS_REQUIRED', 'basis 必填')
       const id = project_id + '__' + workspace_id
-      const existing = domain.table('project_workspace').get(id)
+      const existing = dview.table('project_workspace').get(id)
       const basisText = String(basis)
       const titleText = typeof workspace_title === 'string' ? workspace_title : undefined
       const pathText = typeof workspace_path === 'string' ? workspace_path : undefined
@@ -473,7 +779,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         const next = { ...existing, workspace_title: titleText, workspace_path: pathText, confidence, basis: basisText, rev: existing.rev + 1 }
         delete next.unlinked; delete next.unlinked_at  // 复活
         assertRecord('project_workspace', next)
-        await domain.table('project_workspace').put(id, next)
+        await putJ('project_workspace', id, next)
         await writeLog('link', 'project_workspace', id, (existing.unlinked ? '重新关联工作区' : '改挂工作区') + ' ' + (titleText || workspace_id.slice(0, 8)), existing.rev, next.rev)
         await refreshBaseline()
         return { ...next, changed: true }
@@ -483,7 +789,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (titleText !== undefined) record.workspace_title = titleText
       if (pathText !== undefined) record.workspace_path = pathText
       assertRecord('project_workspace', record)
-      await domain.table('project_workspace').put(id, record)
+      await putJ('project_workspace', id, record)
       await writeLog('link', 'project_workspace', id, '关联工作区 ' + (titleText || workspace_id.slice(0, 8)), null, 1)
       await refreshBaseline()
       return { ...record, changed: true }
@@ -494,15 +800,18 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       assertWritable()
       if (!project_id || !workspace_id) throw new StoreError('INVALID_INPUT', 'project_id / workspace_id 必填')
       const id = project_id + '__' + workspace_id
-      const before = domain.table('project_workspace').get(id)
+      const before = dview.table('project_workspace').get(id)
       if (!before) throw new StoreError('LINK_NOT_FOUND', '这条工作区关联不存在：' + id)
       if (before.unlinked) return { ...before, changed: false }
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '解除工作区关联必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
       const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
       assertRecord('project_workspace', next)
-      await domain.table('project_workspace').put(id, next)
+      await putJ('project_workspace', id, next)
       await writeLog('unlink', 'project_workspace', id, '解除工作区关联 ' + (before.workspace_title || workspace_id.slice(0, 8)), before.rev, next.rev)
       await refreshBaseline()
       return { ...next, changed: true }
@@ -515,18 +824,47 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
      */
     async deleteProject(id, { expected_rev } = {}) {
       assertWritable()
-      const before = domain.table('project').get(id)
+      const before = dview.table('project').get(id)
       if (!before) throw new StoreError('PROJECT_NOT_FOUND', id)
       if (before.status === 'deleted') return { ...before, changed: false }
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '状态迁移必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
       const next = { ...before, status: 'deleted', updated_at: nowIso(), updated_by: actor, rev: before.rev + 1 }
       assertRecord('project', next)
-      await domain.table('project').put(id, next)
+      await putJ('project', id, next)
       await writeLog('delete', 'project', id, '软删除进回收站（子记录零改动）', before.rev, next.rev)
       await refreshBaseline()
       return next
+    },
+
+    /**
+     * S1-B 迁移导入：按原生键写入一条既有记录。
+     *
+     * 幂等规则（R-29）：
+     *   - 键不存在 → 写入（走同一个 journal，带 changelog）
+     *   - 键存在且内容完全相同 → changed:false，零写盘
+     *   - 键存在但内容不同 → MIGRATION_CONFLICT（绝不覆盖）
+     * 同一 client_request_id 再来一次，由 journal 直接回放，连比较都不会发生。
+     */
+    async importRecord({ table, key, record, client_request_id, emit_changelog = true, changelog_extra = null } = {}) {
+      assertWritable()
+      if (!TABLES.includes(table)) throw new StoreError('INVALID_INPUT', '未知表：' + table)
+      if (!key) throw new StoreError('INVALID_INPUT', 'key 必填')
+      const parsed = assertRecord(table, record)
+      const existing = dview.table(table).get(key)
+      if (existing) {
+        if (canon(existing) === canon(parsed)) return { ...existing, changed: false, imported: true }
+        throw new StoreError('MIGRATION_CONFLICT', '目标已有同键记录且内容不同，拒绝覆盖：' + table + '/' + key, { table, key })
+      }
+      await putJ(table, key, parsed)
+      // 历史记录导入不产生“迁移事件”行：历史自带 at/actor/source，另写一条就等于伪造事件。
+      if (emit_changelog) await writeLog('create', table, key, '迁移导入（S1-B）：' + key, null, parsed.rev ?? 1, 'run', changelog_extra)
+      await refreshBaseline()
+      return { ...parsed, changed: true, imported: true }
     },
 
     /**
@@ -537,13 +875,16 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     async addDeliverable({ project_id, title, kind = 'doc', locator, is_final = false, state = 'ok', size = null, mtime = null, sha256 = null, basis, confidence = 'confirmed' } = {}) {
       assertWritable()
       if (!project_id || !title) throw new StoreError('INVALID_INPUT', 'project_id / title 必填')
-      if (!domain.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (!dview.table('project').get(project_id)) throw new StoreError('PROJECT_NOT_FOUND', project_id)
       if (!locator || typeof locator !== 'object' || !locator.type) throw new StoreError('INVALID_INPUT', 'locator 必填（type: workspace|absolute）')
       if (locator.type === 'workspace' && (!locator.workspace_id || !locator.rel)) {
         throw new StoreError('INVALID_INPUT', 'locator.type=workspace 需 workspace_id + rel')
       }
       if (locator.type === 'absolute' && !locator.path) {
         throw new StoreError('INVALID_INPUT', 'locator.type=absolute 需 path')
+      }
+      if (locator.type === 'url' && !locator.url) {
+        throw new StoreError('INVALID_INPUT', 'locator.type=url 需 url')
       }
       const id = newDeliverableId()
       const record = {
@@ -564,7 +905,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       if (basis) record.basis = basis
       if (confidence) record.confidence = confidence
       assertRecord('deliverable', record)
-      await domain.table('deliverable').put(id, record)
+      await putJ('deliverable', id, record)
       await writeLog('create', 'deliverable', id, '登记交付物：' + record.title, null, 1)
       await refreshBaseline()
       return { ...record, changed: true }
@@ -573,24 +914,153 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     /** 0.14 解除交付物关联：软标记 unlinked，零物理删、可恢复；重复解绑零副作用。 */
     async unlinkDeliverable(id, { expected_rev } = {}) {
       assertWritable()
-      const before = domain.table('deliverable').get(id)
+      const before = dview.table('deliverable').get(id)
       if (!before) throw new StoreError('LINK_NOT_FOUND', '交付物不存在：' + id)
       if (before.unlinked) return { ...before, changed: false }
+      if (strictRev && expected_rev === undefined) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '解除交付物必须带 expected_rev（strictRev 已开启）', { id, actual_rev: before.rev })
+      }
       if (expected_rev !== undefined && before.rev !== expected_rev) {
         throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
       }
       const next = { ...before, unlinked: true, unlinked_at: nowIso(), rev: before.rev + 1 }
       assertRecord('deliverable', next)
-      await domain.table('deliverable').put(id, next)
+      await putJ('deliverable', id, next)
       await writeLog('unlink', 'deliverable', id, '解除交付物索引：' + before.title, before.rev, next.rev)
       await refreshBaseline()
       return { ...next, changed: true }
     },
 
-    project: (id) => domain.table('project').get(id),
-    projects: () => [...domain.table('project').entries()].map(([, v]) => v),
-    links: () => [...domain.table('project_session').entries()].map(([, v]) => v),
-    logs: () => [...domain.table('changelog').entries()].map(([, v]) => v),
+    /**
+     * S1-C 任务归属：把任务挂到项目（或显式清空）。
+     *
+     * 与 linkSession 的区别：这条写的是**任务的属性**，不是关系表；
+     * 所以必须同时写清依据与置信度，禁止出现"有 project_id 但说不清凭什么"的记录。
+     * 守卫：项目必须存在、不在回收站；不允许把 confirmed 降级成 inferred（要降请显式传 allow_downgrade）。
+     * 幂等：目标相同且置信度相同 → changed:false，零写盘。
+     */
+    async attributeTask({ task_id, project_id = null, basis, confidence = 'inferred', evidence = null, allow_downgrade = false, expected_rev } = {}) {
+      assertWritable()
+      if (!task_id) throw new StoreError('INVALID_INPUT', 'task_id 必填')
+      const before = dview.table('task').get(task_id)
+      if (!before) throw new StoreError('TASK_NOT_FOUND', '任务不存在：' + task_id)
+      const target = project_id === null ? null : dview.table('project').get(project_id)
+      const v = validateAttributionTarget({ project_id, project: target, confidence: project_id ? confidence : 'inferred' })
+      if (!v.ok) throw new StoreError(v.code, v.message, { task_id, project_id })
+
+      if ((before.project_id ?? null) === project_id && (before.project_confidence ?? null) === (project_id ? confidence : null)) {
+        return { ...before, changed: false }
+      }
+      if (project_id && before.project_confidence === 'confirmed' && confidence === 'inferred' && !allow_downgrade) {
+        throw new StoreError('ATTRIBUTION_DOWNGRADE', '已确认的归属不允许被推断覆盖（要降级请显式 allow_downgrade）', { task_id, project_id })
+      }
+      if (strictRev && expected_rev === undefined && project_id !== null && before.project_id) {
+        throw new StoreError('EXPECTED_REV_REQUIRED', '改写已有归属必须带 expected_rev（strictRev 已开启）', { task_id, actual_rev: before.rev })
+      }
+      if (expected_rev !== undefined && before.rev !== expected_rev) {
+        throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      }
+
+      const next = { ...before, project_id, updated_at: nowIso(), rev: before.rev + 1 }
+      if (project_id) {
+        next.project_basis = String(basis || '未记录依据')
+        next.project_confidence = confidence
+        if (evidence) next.project_evidence = String(evidence)
+      } else {
+        delete next.project_basis
+        delete next.project_confidence
+        delete next.project_evidence
+      }
+      assertRecord('task', next)
+      await putJ('task', task_id, next)
+      const label = project_id ? (target && target.name) || project_id : '（清空）'
+      await writeLog('link', 'task', task_id, '任务归属 → ' + label + '（' + (project_id ? confidence : 'null') + '）', before.rev, next.rev)
+      await refreshBaseline()
+      return { ...next, changed: true }
+    },
+
+    /**
+     * 补台账来源时间（迁移专用）：只写 source_updated_at 一个字段。
+     *
+     * 为什么单独开一个方法：早期迁移把 33 个任务的 updated_at 全写成台账文件头的时刻，
+     * 等于在记录里宣布"33 个任务同一秒更新过"——那不是事实。这里只补真实的那个字段，
+     * 不顺手改别的（改别的请走 attributeTask / 专门的业务方法）。
+     */
+    async setTaskSourceTime({ task_id, source_updated_at, expected_rev } = {}) {
+      assertWritable()
+      if (!task_id) throw new StoreError('INVALID_INPUT', 'task_id 必填')
+      const before = dview.table('task').get(task_id)
+      if (!before) throw new StoreError('TASK_NOT_FOUND', '任务不存在：' + task_id)
+      if (!source_updated_at) throw new StoreError('INVALID_INPUT', 'source_updated_at 必填')
+      if ((before.source_updated_at ?? null) === source_updated_at) return { ...before, changed: false }
+      if (expected_rev === undefined) throw new StoreError('EXPECTED_REV_REQUIRED', '补来源时间必须带 expected_rev', { task_id, actual_rev: before.rev })
+      if (before.rev !== expected_rev) throw new StoreError('REV_CONFLICT', 'rev 不一致：期望 ' + expected_rev + ' 实际 ' + before.rev, { expected_rev, actual: before.rev })
+      const next = { ...before, source_updated_at, updated_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('task', next)
+      await putJ('task', task_id, next)
+      await writeLog('update', 'task', task_id, '补台账来源时间：' + source_updated_at, before.rev, next.rev)
+      await refreshBaseline()
+      return { ...next, changed: true }
+    },
+
+    project: (id) => visibleRecord('project', id, dview.table('project').get(id)),
+    projects: () => visibleAll('project'),
+    tasks: () => visibleAll('task'),
+    taskSessions: () => visibleAll('task_session'),
+    links: () => visibleAll('project_session'),
+    logs: () => visibleAll('changelog'),
+    deliverables: () => visibleAll('deliverable'),
+    workspaces: () => visibleAll('project_workspace'),
+    visibleAll,
+    journal,
+
+    /**
+     * 显式恢复：只由人/受控入口调用，必须 authorized:true。
+     * 恢复执行器不调用 withOp（不递归进 withJournal），只走 stepIO 直接写。
+     */
+    async recover({ authorized, reason } = {}) {
+      if (authorized !== true) throw new StoreError('RECOVERY_UNAUTHORIZED', '恢复必须显式 authorized:true 并说明 reason')
+      if (!journal) throw new StoreError('JOURNAL_DISABLED', '本 store 未启用操作日志')
+      const lock = await journal.acquire()
+      try {
+        const results = await journal.recoverAll(stepIO)
+        let baselineRefreshed = false
+        for (const r of results) {
+          if (r.state === 'COMMITTED' && verdict.writable) { await refreshBaseline(); baselineRefreshed = true }
+        }
+        return { reason: reason ?? null, recovered: results, baselineRefreshed }
+      } finally { lock.release() }
+    },
+    /** 回滚：只允许技术上可逆的操作；含 changelog 的一律 ROLLBACK_FORBIDDEN（向前修复）。 */
+    async rollback({ operation_id, authorized, reason, by } = {}) {
+      if (!journal) throw new StoreError('JOURNAL_DISABLED', '本 store 未启用操作日志')
+      const j = journal.findJournal(operation_id)
+      if (!j) throw new StoreError('OPERATION_NOT_FOUND', '找不到操作 ' + operation_id)
+      const lock = await journal.acquire()
+      try { return await journal.rollbackOp(j, stepIO, { authorized, reason, actor: by ?? actor }) }
+      finally { lock.release() }
+    },
+    rollbackPlan: (operation_id) => {
+      if (!journal) throw new StoreError('JOURNAL_DISABLED', '本 store 未启用操作日志')
+      const j = journal.findJournal(operation_id)
+      if (!j) throw new StoreError('OPERATION_NOT_FOUND', '找不到操作 ' + operation_id)
+      return journal.planRollback(j)
+    },
+    /** 双主检测（只读）：返回 [{project_id, sessions:[...]}]，空数组=没有冲突。 */
+    primaryConflicts: () => {
+      const byProject = {}
+      for (const l of store.links()) {
+        if (l.role !== 'primary' || l.unlinked === true) continue
+        ;(byProject[l.project_id] = byProject[l.project_id] || []).push(l.session_id)
+      }
+      return Object.entries(byProject).filter(([, v]) => v.length > 1).map(([project_id, sessions]) => ({ project_id, sessions }))
+    },
+    pendingOperations: () => (journal ? journal.listJournals().filter((j) => j.state === 'PREPARED' || j.state === 'APPLYING').map((j) => ({ operation_id: j.operation_id, op: j.op, state: j.state, steps: (j.steps || []).length })) : []),
+    staleLock: () => (journal ? journal.holderInfo() : null),
+    takeOverStaleLock: ({ authorized, reason, by } = {}) => {
+      if (!journal) throw new StoreError('JOURNAL_DISABLED', '本 store 未启用操作日志')
+      return journal.recoverStaleLock({ authorized, reason, actor: by ?? actor })
+    },
 
     /**
      * 九条对账（状态三分 + 降级严格只读）。
@@ -619,6 +1089,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       const projects = store.projects()
       const links = store.links()
       const ids = new Set(projects.map(p => p.id))
+      const projById = new Map(projects.map(p => [p.id, p]))
       /**
        * @param scope 'core'（核心数据完整性）| 'external'（外部引用，如 DSH 注册表）
        * 两类 skipped 的含义不同：external 只是"没查"，core 才是"可能坏了"。
@@ -664,9 +1135,15 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
         add(6, '磁盘文件数 vs 内存记录数（D1）', byCount(d1.length), d1.length ? JSON.stringify(d1) : 'disk=mem')
       }
 
-      const deliv = [...domain.table('deliverable').entries()].map(([, v]) => v)
-      const badDeliv = deliv.filter(d => !ids.has(d.project_id))
-      add(7, 'deliverable.project_id 有效', byCount(badDeliv.length), 'deliverables=' + deliv.length)
+      const deliv = [...dview.table('deliverable').entries()].map(([, v]) => v)
+      // S1-B 起 project_id 可空（交付物只证明"某任务产出了它"，没有项目归属证据）。
+      // 原来的写法把**合法的 null** 也算成悬挂引用，等于让"如实留空"变成对账红条。
+      const badDeliv = deliv.filter((d) => {
+        if (!d || !d.project_id) return false
+        const p = projById.get(d.project_id)
+        return !p || p.status === 'deleted'
+      })
+      add(7, 'deliverable.project_id 有效（空合法；指向必须在场且不在回收站）', byCount(badDeliv.length), 'deliverables=' + deliv.length)
 
       const d2 = verdict.criteria.filter(c => c.code.startsWith('D2') || c.code === 'D3_BASELINE_REGRESSION')
       // 同第 6 条：基线比对也依赖磁盘计数，扫描不可用时必须 skipped。
@@ -675,6 +1152,23 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       } else {
         add(8, '计数 vs 基线（D2/D3）', byCount(d2.length), d2.length ? JSON.stringify(d2) : 'ok')
       }
+
+      const primByProject = {}
+      for (const l of links) if (l.role === 'primary' && l.unlinked !== true) (primByProject[l.project_id] = primByProject[l.project_id] || []).push(l.session_id)
+      const doublePrim = Object.entries(primByProject).filter(([, v]) => v.length > 1)
+      add(10, '每个 project 的有效 primary ≤ 1（PROJECT_PRIMARY_CONFLICT）', byCount(doublePrim.length),
+        doublePrim.length ? JSON.stringify(doublePrim.map(([p, s]) => ({ project_id: p, sessions: s }))) : 'ok')
+
+      // S1-C 第 11 条：任务归属必须指得回一个活着的项目。
+      // project_id 是可空字段，空不是错；指向不存在的项目、或指向回收站里的项目才是错。
+      const tasksAll = [...dview.table('task').entries()].map(([, v]) => v)
+      const badTaskProject = tasksAll.filter((t) => {
+        if (!t || !t.project_id) return false
+        const p = projById.get(t.project_id)
+        return !p || p.status === 'deleted'
+      })
+      add(11, 'task.project_id 有效（可找回且不在回收站）', byCount(badTaskProject.length),
+        badTaskProject.length ? JSON.stringify(badTaskProject.map((t) => ({ task_id: t.id, project_id: t.project_id }))) : 'tasks=' + tasksAll.length)
 
       const recent = store.logs().slice(-100)
       const badLog = recent.filter(l => l.target_table === 'project' && !ids.has(l.target_key))
@@ -724,5 +1218,101 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     },
   })
 
+  // S1-A：所有写入口统一走 journal。嵌套写自动合并成同一个操作（createProject → linkSession）。
+  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime']
+  for (const name of JOURNALED) {
+    const impl = store[name]
+    if (typeof impl !== 'function') continue
+    store[name] = async function journaledWrite(...callArgs) {
+      const meta = callArgs.find((a) => a && typeof a === 'object' && ('client_request_id' in a || 'manual' in a)) || {}
+      const opArgs = { ...meta }
+      if (typeof callArgs[0] === 'string') opArgs.id = callArgs[0]
+      else if (callArgs[0] && typeof callArgs[0] === 'object') Object.assign(opArgs, callArgs[0])
+      if (callArgs[1] && typeof callArgs[1] === 'object') Object.assign(opArgs, callArgs[1])
+      return withOp(name, opArgs, () => impl.apply(store, callArgs))
+    }
+  }
+
   return store
+}
+
+/**
+ * 只读打开：不 mkdir、不建域、不写 global.json，直接读磁盘 + 用同一份 schema 校验。
+ * 目的：T41 能用“前后文件哈希完全一致”证明只读，而不是靠函数注释声明。
+ */
+export async function openStoreReadOnly({ root, writer = 'dsh-project-core@0.1.0-s0', version = VERSION, compatibleVersions, extraProject } = {}) {
+  const spec = buildSpec({ version, compatibleVersions, writer, extraProject })
+  const acceptedVersions = [spec.version, ...(spec.compatibleVersions ?? [])]
+  const unitDir = join(root, 'project')
+  if (!existsSync(unitDir)) throw new StoreError('STORE_NOT_FOUND', '数据域目录不存在：' + unitDir + '（只读模式不会自动创建）')
+  const scan = await scanUnit(root, { tables: TABLES, acceptedVersions })
+  let metaRaw = null
+  let metaState = 'missing'
+  const globalPath = join(unitDir, 'global.json')
+  if (existsSync(globalPath)) {
+    try {
+      const doc = JSON.parse(readFileSync(globalPath, 'utf8'))
+      // 盘上是 {version, record} 信封（域层写的就是这个形状），表记录已经拆过信封，
+      // 全局元数据这里过去**没拆**——于是任何正常域在只读模式下都被判成 metaState=corrupt。
+      // 只读模式恰恰是"看不出问题就别乱动"的那条路，它自己不能先报假损坏。
+      metaRaw = doc && typeof doc === 'object' && doc.record && typeof doc.record === 'object' ? doc.record
+        : (doc && typeof doc === 'object' && doc.value && typeof doc.value === 'object' ? doc.value : doc)
+    } catch { metaState = 'corrupt' }
+    if (metaRaw) { const p = MetaSchema.safeParse(metaRaw); if (p.success) metaState = 'ok'; else metaState = 'corrupt' }
+  }
+  const tables = {}
+  const invalid = []
+  for (const t of TABLES) {
+    const map = new Map()
+    const dir = join(unitDir, t)
+    if (existsSync(dir)) {
+      for (const n of readdirSync(dir)) {
+        if (!n.endsWith('.json')) continue
+        const key = n.slice(0, -5)
+        try {
+          const doc = JSON.parse(readFileSync(join(dir, n), 'utf8'))
+          const rec = doc && typeof doc === 'object' && doc.record && typeof doc.record === 'object' ? doc.record
+            : (doc && typeof doc === 'object' && doc.value && typeof doc.value === 'object' ? doc.value : doc)
+          const parsed = spec.tables[t].valueSchema.safeParse(rec)
+          if (parsed.success) map.set(key, parsed.data)
+          else invalid.push({ table: t, key, issues: parsed.error.issues.map((i) => i.path.join('.')) })
+        } catch (e) { invalid.push({ table: t, key, error: String(e && e.message ? e.message : e) }) }
+      }
+    }
+    tables[t] = map
+  }
+  const meta = metaState === 'ok' ? metaRaw : initialMeta(writer)
+  const domain = {
+    global: { get: () => meta },
+    table: (t) => ({ get: (k) => tables[t].get(k), entries: () => tables[t].entries(), size: tables[t].size }),
+  }
+  const expected = metaState === 'ok' ? meta.expected_counts ?? null : null
+  const verdict = evaluate({ scanBefore: scan, scanAfter: scan, domain, tables: TABLES, expectedCounts: expected, acceptedVersions })
+  const readonly = {
+    root, spec, domain, mode: 'read', readonly: true,
+    get verdict() { return verdict },
+    get writable() { return false },
+    get counts() { return verdict.counts },
+    get invalidRecords() { return invalid },
+    project: (id) => tables.project.get(id),
+    projects: () => [...tables.project.values()],
+    tasks: () => [...tables.task.values()],
+    taskSessions: () => [...tables.task_session.values()],
+    links: () => [...tables.project_session.values()],
+    logs: () => [...tables.changelog.values()],
+    deliverables: () => [...tables.deliverable.values()],
+    workspaces: () => [...tables.project_workspace.values()],
+    visibleAll: (t) => [...(tables[t] ? tables[t].values() : [])],
+    meta: () => meta,
+    async refresh() { return verdict },
+    async close() {},
+    degradationReport() {
+      return { degraded: verdict.degraded, writable: false, kind: verdict.degraded ? 'readonly_mode' : 'ok', codes: verdict.criteria.map((c) => c.code), evidence: { metaState, invalid: invalid.length } }
+    },
+    _writeRefused(op) { throw new StoreError('READONLY_MODE', '只读打开：拒绝写操作 ' + op) },
+  }
+  for (const op of ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable']) {
+    readonly[op] = async () => readonly._writeRefused(op)
+  }
+  return readonly
 }
