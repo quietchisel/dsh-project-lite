@@ -496,7 +496,9 @@ export function apply(ctx, config = {}) {
         const message = String(error && error.message ? error.message : error)
         const httpStatus = code === 'READONLY_DEGRADED' ? 409
           : code === 'PROJECT_NOT_FOUND' ? 404
-          : code === 'REV_CONFLICT' || code === 'EXPECTED_REV_REQUIRED' || code === 'REQUEST_ID_CONFLICT' ? 409
+          // S1-B：双主/回收站属于“状态冲突”，用 409 与 REV_CONFLICT 同档，界面按冲突提示
+          : code === 'REV_CONFLICT' || code === 'EXPECTED_REV_REQUIRED' || code === 'REQUEST_ID_CONFLICT'
+            || code === 'PROJECT_PRIMARY_CONFLICT' || code === 'PROJECT_DELETED' ? 409
           : code === 'INTERNAL_ERROR' ? 500
           : 400
         await evidence({ phase: 'link-error', code, message })

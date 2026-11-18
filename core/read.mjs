@@ -22,6 +22,8 @@ export const STATUS_GROUPS = ['active', 'paused', 'done', 'archived', 'deleted']
 const snapshot = (x) => JSON.parse(JSON.stringify(x))
 
 function tableAll(store, name) {
+  // S1-A：优先走 store 的可见性读口（APPLYING 期间隐藏未提交的新建记录 / 返回 before 快照）。
+  if (typeof store.visibleAll === 'function') return store.visibleAll(name)
   return [...store.domain.table(name).entries()].map(([, v]) => v)
 }
 
@@ -43,6 +45,29 @@ function projectSummary(p) {
     created_at: p.created_at,
     updated_at: p.updated_at,
     rev: p.rev,
+  }
+}
+
+/**
+ * 0.15.0：任务视图（只读）。台账迁移进来的 Task，归属靠 project_id；
+ * project_confidence 必须一起给出去——inferred 是"按会话继承推断"，不是"我确认它属于这个项目"。
+ */
+function taskView(t) {
+  return {
+    id: t.id,
+    source_id: t.source_id,
+    title: t.title,
+    objective: t.objective,
+    lifecycle: t.lifecycle,
+    acceptance: t.acceptance,
+    next_action: t.next_action ?? null,
+    project_id: t.project_id ?? null,
+    project_confidence: t.project_confidence ?? null,
+    project_basis: t.project_basis ?? null,
+    primary_session_id: t.primary_session_id ?? null,
+    source_updated_at: t.source_updated_at ?? null,
+    updated_at: t.updated_at,
+    rev: t.rev,
   }
 }
 
@@ -173,7 +198,8 @@ export function createReadService(store, options = {}) {
     if (!p) {
       return snapshot({
         ok: true, found: false, project: null,
-        sessions: [], workspaces: [], deliverables: [], logs: [],
+        sessions: [], workspaces: [], tasks: [], deliverables: [], logs: [],
+        counts: { sessions: 0, workspaces: 0, tasks: 0, tasks_stale: 0, deliverables: 0, logs: 0, unconfirmed: 0 },
         ...common(),
       })
     }
@@ -186,11 +212,54 @@ export function createReadService(store, options = {}) {
     if (registry && typeof registry.snapshot === 'function') {
       try { dSnap = await registry.snapshot() } catch { dSnap = null }
     }
-    const deliverablesRaw = tableAll(store, 'deliverable').filter((d) => d.project_id === id && !d.unlinked)
+    /**
+     * 0.15.1 任务归属改成**动态**：会话挂到项目 → 它的任务自动属于这个项目；解绑 → 自动离开。
+     *
+     * 两种归属并存，优先级不同：
+     *   ① 人工钉住（project_confidence==='confirmed'）——存在任务记录里，永远优先，不随会话变；
+     *   ② 跟随会话（没有钉住时）——**读的时候现算**：任务的主会话现在挂在哪个项目，它就属于哪个项目。
+     * 库里即使存着 inferred 的 project_id，也一律以现算为准（存量脏值不会影响显示）。
+     */
+    const sessionProject = new Map()
+    for (const l of tableAll(store, 'project_session')) {
+      if (!l || l.unlinked === true) continue
+      // 一个会话同时挂多个项目时不猜：置成 null，让这条任务失去归属（跟 attr-v1 的 MULTI_PROJECT 同一口径）。
+      sessionProject.set(l.session_id, sessionProject.has(l.session_id) ? null : l.project_id)
+    }
+    const effectiveProjectOf = (t) => {
+      if (t.project_confidence === 'confirmed' && t.project_id) return { pid: t.project_id, source: 'confirmed' }
+      const derived = t.primary_session_id ? sessionProject.get(t.primary_session_id) : undefined
+      return derived ? { pid: derived, source: 'session' } : { pid: null, source: null }
+    }
+    const tasks = tableAll(store, 'task')
+      .map((t) => ({ t, eff: effectiveProjectOf(t) }))
+      .filter((x) => x.eff.pid === id)
+      .map(({ t, eff }) => {
+        const v = taskView(t)
+        v.project_id = id
+        v.project_source = eff.source          // 'confirmed' | 'session'
+        v.evidence_stale = false               // 动态归属不会"失效"：依据没了它就走了
+        return v
+      })
+      .sort((a, b) => String(a.source_id || '~').localeCompare(String(b.source_id || '~')))
+    const myTaskIds = new Set(tasks.map((t) => t.id))
+    /**
+     * 0.15.0：交付物按**两条路**归属到项目——
+     *   ① 直接挂在本项目（d.project_id === id，老数据走这条）；
+     *   ② 本项目的任务产出的（d.task_ids 命中本项目任务，新迁移的 123 条走这条）。
+     * 只做并集，不改记录：交付物本身仍然 project_id=null，归属是从任务推出来的。
+     */
+    const deliverablesRaw = tableAll(store, 'deliverable').filter((d) => {
+      if (d.unlinked) return false
+      if (d.project_id === id) return true
+      const ids = Array.isArray(d.task_ids) ? d.task_ids : (d.task_id ? [d.task_id] : [])
+      return ids.some((t) => myTaskIds.has(t))
+    })
     const deliverables = []
     for (const d of deliverablesRaw) {
       const check = await checkDeliverable(d, dSnap)
-      deliverables.push({ ...d, check })
+      // derived=true 表示"这条不属于本项目，是本项目任务产出的"——前端据此不给「移除」按钮。
+      deliverables.push({ ...d, check, derived: d.project_id !== id })
     }
     const keys = new Set([id, ...links.map((l) => l.id)])
     // changelog 倒序 + 上限 100：详情页只用来"看最近发生了什么"，不做全量导出。
@@ -202,19 +271,24 @@ export function createReadService(store, options = {}) {
      * 「未确认」清单：confidence === 'inferred' 的项目 / 会话 / 工作区 / 交付物。
      * 徽标与依据浮层只读这一个数组，不在前端各自判断一遍——两处判断一定会漂移。
      */
+    const staleCount = 0 // 动态归属下不再有"依据失效"状态，字段保留只为兼容旧前端
     const unconfirmed = []
     const project = projectSummary(p)
     if (project.confidence === 'inferred') unconfirmed.push({ kind: 'project', id: project.id, basis: project.basis })
     for (const l of links) if (l.confidence === 'inferred') unconfirmed.push({ kind: 'session', id: l.id, session_id: l.session_id, basis: l.basis })
     for (const w of workspaces) if (w.confidence === 'inferred') unconfirmed.push({ kind: 'workspace', id: w.id, workspace_id: w.workspace_id, basis: w.basis })
     for (const d of deliverables) if (d.confidence === 'inferred') unconfirmed.push({ kind: 'deliverable', id: d.id, title: d.title, basis: d.basis })
+    // 任务归属若是推断出来的，同样进「未确认」清单——别让 inferred 混在确认项里。
+    for (const t of tasks) if (t.project_confidence === 'inferred') unconfirmed.push({ kind: 'task', id: t.id, title: (t.source_id || '') + ' ' + t.title, basis: t.project_basis })
     return snapshot({
       ok: true, found: true,
       project,
-      sessions: links, workspaces, deliverables, logs,
+      sessions: links, workspaces, tasks, deliverables, logs,
       counts: {
         sessions: links.length,
         workspaces: workspaces.length,
+        tasks: tasks.length,
+        tasks_stale: staleCount,
         deliverables: deliverables.length,
         logs: logs.length,
         unconfirmed: unconfirmed.length,

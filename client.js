@@ -16,7 +16,36 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useState } = React
 
-    const API_STATE = 'api/project/state'
+    /**
+ * S1-B：一个 Project 最多一个有效 primary。
+ * 这里只做**默认值推断**与提示，真正的拒绝在后端（PROJECT_PRIMARY_CONFLICT）。
+ * 注意：unlinked 的历史记录不算“有效”——与后端 activePrimaryOf() 同口径。
+ */
+function activeLinksOf(links) {
+  return (Array.isArray(links) ? links : []).filter((l) => l && l.unlinked !== true)
+}
+function activePrimariesOf(links) {
+  return activeLinksOf(links).filter((l) => l.role === 'primary')
+}
+function defaultLinkRole(links) {
+  return activePrimariesOf(links).length === 0 ? 'primary' : 'supporting'
+}
+function linkRoleHint(links) {
+  const prim = activePrimariesOf(links)
+  const label = (l) => l.title || ('会话 ' + String(l.session_id || '').slice(7, 15))
+  if (prim.length === 0) {
+    return { kind: 'none', text: '这个项目还没有主会话；本次关联默认设为主会话（primary）。' }
+  }
+  if (prim.length === 1) {
+    return { kind: 'one', text: '当前主会话：' + label(prim[0]) + '；新关联默认是辅助会话（supporting）。主会话不会因此改变。' }
+  }
+  return {
+    kind: 'conflict',
+    text: '⚠ 该项目存在 ' + prim.length + ' 个历史主会话（primary 冲突），需要人工裁决；新关联默认是辅助会话（supporting）。',
+  }
+}
+
+const API_STATE = 'api/project/state'
     const API_FULL = 'api/project/state?reconcile=1'
     const API_OVERVIEW = 'api/project/overview'
     // 1.3 唯一写入口。方法必须是 POST；GET 会被后端 405。
@@ -61,6 +90,16 @@ window.__ModuleLoader__.load({
       redBody: { fontSize: '12px', lineHeight: '18px' },
       ok: { border: '1px solid #1e8e3e', background: '#e6f4ea', color: '#0d652d', borderRadius: '8px', padding: '8px 12px', marginBottom: '12px', fontSize: '12px' },
       section: { border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px' },
+  // 0.15.0 任务区：状态色 + 一行标题（summary 去掉默认三角对齐问题）
+  taskSummary: { display: 'flex', alignItems: 'baseline', gap: '8px', cursor: 'pointer', lineHeight: '1.6' },
+  taskTitle: { flex: '1 1 auto', minWidth: 0 },
+  taskCode: { flex: '0 0 auto', whiteSpace: 'nowrap', fontSize: '11px', opacity: 0.55 },
+  taskDoing: { flex: '0 0 auto', fontSize: '11px', padding: '1px 6px', borderRadius: '4px', color: '#0b6bcb', background: 'rgba(11,107,203,0.12)' },
+  taskVerify: { flex: '0 0 auto', fontSize: '11px', padding: '1px 6px', borderRadius: '4px', color: '#b06000', background: 'rgba(176,96,0,0.12)' },
+  taskDone: { flex: '0 0 auto', fontSize: '11px', padding: '1px 6px', borderRadius: '4px', color: 'rgba(128,128,128,0.95)', background: 'rgba(128,128,128,0.14)' },
+  taskPinned: { flex: '0 0 auto', fontSize: '11px', padding: '1px 6px', borderRadius: '4px', color: '#0b6bcb', background: 'rgba(11,107,203,0.12)' },
+  taskFollow: { flex: '0 0 auto', fontSize: '11px', padding: '1px 6px', borderRadius: '4px', color: 'rgba(128,128,128,0.95)', background: 'rgba(128,128,128,0.14)' },
+  dlGroupHead: { marginTop: '8px', marginBottom: '2px', fontSize: '12px', opacity: 0.75, fontWeight: 600 },
       row: { display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '12px', marginBottom: '8px' },
       num: { fontVariantNumeric: 'tabular-nums', fontWeight: 600 },
       item: { fontSize: '12px', lineHeight: '19px', padding: '2px 0' },
@@ -224,6 +263,7 @@ window.__ModuleLoader__.load({
 
       // 1.4 关联会话：同时只服务一个项目；候选来自后端 /api/project/sessions。
       const [linkFor, setLinkFor] = useState(null)
+      const [linkRole, setLinkRole] = useState('primary')
       const [linkQ, setLinkQ] = useState('')
       const [linkData, setLinkData] = useState(null)
       const [linkBusy, setLinkBusy] = useState(false)
@@ -622,10 +662,25 @@ window.__ModuleLoader__.load({
       }, [loadOverview, openDetail, detail])
 
       /** 打开某个项目的关联选择器（同时只开一个）。 */
-      const openLink = useCallback((p) => {
-        setLinkFor({ id: p.id, name: p.name || p.id })
+      const openLink = useCallback(async (p) => {
+        const base = { id: p.id, name: p.name || p.id, links: null }
+        setLinkFor(base)
+        setLinkRole('primary')
         setLinkQ(''); setLinkData(null); setLinkErr(null); setLinkDone(null)
         loadSessions('')
+        // 必须先把该项目的现有会话读出来，否则默认角色会猜错（S1-B 要求）
+        try {
+          const res = await fetch(API_GET + '?id=' + encodeURIComponent(p.id), { cache: 'no-store' })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          const links = (json && json.ok && Array.isArray(json.sessions)) ? json.sessions : []
+          setLinkFor({ id: p.id, name: p.name || p.id, links })
+          setLinkRole(defaultLinkRole(links))
+        } catch (e) {
+          // 读不到就保守：不带 links（默认 primary），并在提交时由后端把关
+          setLinkFor({ id: p.id, name: p.name || p.id, links: [] })
+          setLinkRole('primary')
+        }
       }, [loadSessions])
 
       /**
@@ -635,19 +690,29 @@ window.__ModuleLoader__.load({
       const submitLink = useCallback(async (sessionId) => {
         if (!linkFor || linkBusy) return
         setLinkBusy(true); setLinkErr(null); setLinkDone(null)
+        // S1-B：role 必须显式提交，不能依赖后端默认值（后端默认是 primary）
+        const roleToSend = linkRole === 'supporting' ? 'supporting' : 'primary'
         try {
           const res = await fetch(API_LINK, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ requestId: newRequestId(), project_id: linkFor.id, session_id: sessionId, basis: '界面手动关联' }),
+            body: JSON.stringify({ requestId: newRequestId(), project_id: linkFor.id, session_id: sessionId, role: roleToSend, basis: '界面手动关联' }),
           })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
           if (json && json.ok) {
             setLinkDone(json.changed
-              ? ('已关联：' + sessionId)
+              ? ('已关联（' + roleToSend + '）：' + sessionId)
               : ('已经关联过了，零副作用（rev / changelog / 基线都没动）：' + sessionId))
             await loadOverview()
+            // 关联后重算默认角色：否则连挂第二个会话时还会默认 primary → 被后端拒
+            try {
+              const dr = await fetch(API_GET + '?id=' + encodeURIComponent(linkFor.id), { cache: 'no-store' })
+              const dj = await dr.json().catch(() => null)
+              const links = (dj && dj.ok && Array.isArray(dj.sessions)) ? dj.sessions : []
+              setLinkFor({ id: linkFor.id, name: linkFor.name, links })
+              setLinkRole(defaultLinkRole(links))
+            } catch (e) { /* 刷新失败不阻塞主流程 */ }
           } else {
             const er = json && json.error
             setLinkErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
@@ -657,7 +722,7 @@ window.__ModuleLoader__.load({
         } finally {
           setLinkBusy(false)
         }
-      }, [linkFor, linkBusy, loadOverview])
+      }, [linkFor, linkBusy, linkRole, loadOverview])
 
       useEffect(() => {
         let alive = true
@@ -897,6 +962,22 @@ window.__ModuleLoader__.load({
        * 1.4 关联会话选择器。四态与新建表单一致：未开 / 读取中 / 有候选 / 出错。
        * 候选行的标题来自会话缓存，缓存里没有就显示 session id —— 不编造标题。
        */
+      const linkHint = linkRoleHint(linkFor && linkFor.links)
+      const linkRoleField = h('label', { style: C.field },
+        h('span', { style: C.label }, '本次关联的角色'),
+        h('select', {
+          style: C.input,
+          value: linkRole,
+          'data-field': 'link-role',
+          onChange: (e) => setLinkRole(e && e.target && e.target.value === 'supporting' ? 'supporting' : 'primary'),
+        },
+          h('option', { value: 'primary' }, '主会话 primary'),
+          h('option', { value: 'supporting' }, '辅助会话 supporting')))
+      const linkHintEl = h('div', {
+        style: C.hint,
+        'data-link-role-hint': linkHint.kind,
+        'data-link-role-hint-kind': linkHint.kind,
+      }, linkHint.text)
       const linkPicker = linkFor ? h('div', { style: C.picker, 'data-link-form': '1', 'data-link-project': linkFor.id },
         // 「收起」必须固定在标题行：放到滚动区底部时，候选一多就滚出视野，收不起来（2026-11-16 反馈）。
         // 标题行 sticky：滚候选列表时「收起」按钮固定在选择器顶部，不用滚回最上面（2026-11-16 反馈）。
@@ -910,6 +991,10 @@ window.__ModuleLoader__.load({
             onClick: () => { setLinkFor(null); setLinkData(null); setLinkErr(null); setLinkDone(null) },
           }, '收起'),
         ),
+        linkFor.links === null
+          ? h('div', { style: C.muted, 'data-link-loading': '1' }, '正在读取该项目现有会话…')
+          : linkRoleField,
+        linkFor.links === null ? null : linkHintEl,
         linkErr ? h('div', { style: C.err, role: 'alert', 'data-link-error': '1' }, '关联失败：' + linkErr) : null,
         linkDone ? h('div', { style: C.done, 'data-link-done': '1' }, linkDone) : null,
         h('label', { style: C.field },
@@ -935,7 +1020,10 @@ window.__ModuleLoader__.load({
                 : linkData.sessions.map((s) => h('div', { key: 's' + s.session_id, style: Object.assign({}, C.sessRow, C.sessRowHover), 'data-session-id': s.session_id },
                     h('div', { style: C.sessBody },
                       h('div', { style: C.sessTitle }, s.title || ('会话 ' + s.session_id.slice(7, 15))),
-                      h('div', { style: C.sessSub }, h('span', null, s.workspace_title || '未知工作区'), ' · ', h('span', { style: C.sessId }, s.session_id.slice(0, 13) + '…')),
+                      h('div', { style: C.sessSub }, h('span', null, s.workspace_title || '未知工作区'), ' · ', h('span', { style: C.sessId }, s.session_id.slice(0, 13) + '…'),
+                        activePrimariesOf(linkFor.links).some((l) => l.session_id === s.session_id)
+                          ? h('span', { style: Object.assign({}, C.tag, { marginLeft: '6px' }), 'data-already-primary': '1' }, '已是主会话')
+                          : null),
                     ),
                     h('button', {
                       type: 'button',
@@ -1033,6 +1121,53 @@ window.__ModuleLoader__.load({
           ? h('span', { style: Object.assign({}, C.tag, { color: '#b06000' }), 'data-badge': 'inferred' }, '未确认')
           : null)
         const line = (k, v) => h('div', { style: C.projMeta }, k + '：' + (v || '—'))
+        /**
+         * 0.15.0 任务区：用户视角是「这个项目由哪些事组成、做到哪了」，
+         * 所以先给进度，再给清单；每条默认收起，点开才看目标/下一步/主会话。
+         * 状态一律说人话：在做 / 做完待验 / 已完成（不摆 lifecycle·acceptance 这种内部字段）。
+         * 只读——任务的写入口还没有，别在这里放假按钮。
+         */
+        const taskWord = (t) => (t.lifecycle !== 'active' ? '已完成'
+          : t.acceptance === 'implemented_unverified' ? '做完待验' : '在做')
+        const taskTone = (t) => (t.lifecycle !== 'active' ? C.taskDone
+          : t.acceptance === 'implemented_unverified' ? C.taskVerify : C.taskDoing)
+        const taskRow = (t) => h('details', { key: 'dt' + t.id, style: C.item, 'data-task-row': t.id, 'data-task-source': t.source_id || '' },
+          h('summary', { style: C.taskSummary },
+            h('span', { style: taskTone(t) }, taskWord(t)),
+            h('span', { style: C.taskTitle }, t.title || t.id),
+            // 跟随会话是默认规则，不必每行重复；只有"人工钉住"才需要标出来。
+            t.project_source === 'confirmed'
+              ? h('span', { style: C.taskPinned, 'data-task-source-kind': 'confirmed', title: '人工钉住：解绑会话也不会走' }, '人工确认')
+              : null,
+            h('span', { style: C.taskCode }, t.source_id || '')),
+          h('div', { style: C.projMeta }, '目标：' + (t.objective || '—')),
+          t.next_action ? h('div', { style: C.projMeta }, '下一步：' + (t.next_action)) : null,
+          h('div', { style: C.projMeta }, '主会话：' + (t.primary_session_id || '—')),
+          h('div', { style: C.projMeta },
+            t.project_source === 'confirmed'
+              ? '归属：人工钉住（' + (t.project_basis || '人工判定') + '）——解绑会话也不会走'
+              : '归属：跟随主会话（' + (t.primary_session_id || '无') + ' 挂在哪个项目，它就在哪个项目）'))
+        const tasksAll = dd.tasks || []
+        const taskDoing = tasksAll.filter((t) => t.lifecycle === 'active')
+        const taskDone = tasksAll.filter((t) => t.lifecycle !== 'active')
+        // 先列在做的，已完成的沉到底部——用户打开详情最想知道"还有什么没做完"。
+        const tasks = taskDoing.concat(taskDone).map(taskRow)
+        /**
+         * 进度行必须把「两种归属」分开说清：
+         *   跟随会话的，解绑会走；人工确认的，解绑也不会走。
+         * 只说"归属跟随会话"会让用户以为解绑了任务就该没——P2 那种全钉住的项目就会显得自相矛盾。
+         */
+        const taskFollow = tasksAll.filter((t) => t.project_source !== 'confirmed').length
+        const taskPinned = tasksAll.length - taskFollow
+        const taskHead = tasksAll.length
+          ? h('div', { style: C.projMeta, 'data-task-progress': '1' },
+              '共 ' + tasksAll.length + ' 个任务 · 在做 ' + taskDoing.length + ' · 已完成 ' + taskDone.length
+              + (taskPinned
+                  ? ' · 其中 ' + taskPinned + ' 个是「人工确认」（解绑会话也不会走）'
+                    + (taskFollow ? '，' + taskFollow + ' 个跟随会话' : '')
+                  : ' · 全部跟随会话（会话挂到本项目它就在，解绑就离开）')
+              + '。点标题看详情')
+          : null
         const sessions = (dd.sessions || []).map((l) => h('div', { key: 'ds' + l.id, style: Object.assign({}, C.sessRow, C.sessRowHover), 'data-session-row': l.session_id },
           h('span', { style: C.sessRole, title: '角色：' + (l.role || '—') }, l.role === 'primary' ? '主' : (l.role || '辅')),
           h('div', { style: C.sessBody },
@@ -1085,6 +1220,31 @@ window.__ModuleLoader__.load({
           ? h('span', { style: C.dlMissing }, '❌ 失效')
           : h('span', { style: C.dlUnreach }, '⚠ 不可达')
         const openDl = (x) => openPath((x.check && x.check.resolved) || (x.locator && x.locator.base_snapshot) || '', '这条交付物没记录路径，无法打开')
+        /**
+         * 交付物按**产出类型**分组（不是按扩展名硬分，是按"这东西是什么"）：
+         *   文档 / 脚本 / 图片与媒体 / 数据与压缩包 / 线上链接。
+         * 理由：一个项目看产出，先想知道"有几份文档、几个脚本、几张图"，而不是按 .md/.mjs 分十几堆。
+         * 行里不再铺全路径（太长），路径放悬停；标题可点开文件。
+         */
+        const dlType = (x) => {
+          if (x.locator && x.locator.type === 'url') return '链接'
+          const k = x.kind || 'doc'
+          return k === 'doc' ? '文档' : k === 'code' ? '脚本' : k === 'media' ? '图片与媒体' : k === 'zip' ? '压缩包' : k === 'data' ? '数据' : '其他'
+        }
+        const DL_ORDER = ['文档', '脚本', '图片与媒体', '数据', '压缩包', '链接', '其他']
+        // 标题已经是文件名，这里只给"它在哪个文件夹"，不重复文件名、不铺全路径。
+        const shortPath = (x) => {
+          const p2 = (x.check && x.check.resolved) || (x.locator && (x.locator.rel || x.locator.path)) || (x.locator && x.locator.url) || ''
+          const s = String(p2)
+          if (!s) return '无路径'
+          if (s.indexOf('http://') === 0) return s.slice(7)
+          if (s.indexOf('https://') === 0) return s.slice(8)
+          const parts = s.split(/[\\/]/).filter(Boolean)
+          if (parts.length <= 1) return '（项目根目录）'
+          const dir = parts[parts.length - 2]
+          return (parts.length > 2 ? '…/' : '') + dir + '/'
+        }
+        const fmtSize = (n) => (n >= 1024 * 1024 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B')
         const dlRow = (x) => h('div', { key: 'dd' + x.id, style: C.dlRow, 'data-deliverable-id': x.id },
           h('div', { style: C.dlBody },
             h('div', {
@@ -1094,15 +1254,16 @@ window.__ModuleLoader__.load({
               onClick: () => openDl(x),
               onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDl(x) } },
             }, x.title || x.id),
-            h('div', { style: C.dlMeta },
-              (x.kind || '?')
-              + ' · ' + ((x.check && x.check.resolved) || (x.locator && x.locator.rel) || (x.locator && x.locator.path) || '无路径')
-              + (x.check && x.check.size != null ? ' · ' + x.check.size + ' B' : '')
-              + (x.check && x.check.mtime ? ' · 改于 ' + String(x.check.mtime).slice(0, 16).replace('T', ' ') : '')
-              + (x.is_final ? ' · 最终成品' : '')),
+            h('div', { style: C.dlMeta, title: (x.check && x.check.resolved) || '' },
+              shortPath(x)
+              + (x.check && x.check.size != null ? ' · ' + fmtSize(x.check.size) : '')
+              + (x.is_final ? ' · 最终成品' : '')
+              + (Array.isArray(x.task_ids) && x.task_ids.length > 1 ? ' · ' + x.task_ids.length + ' 个任务共用' : '')),
           ),
-          dlBadge(x.check && x.check.state),
-          p.status !== 'deleted'
+          // 正常的不打标（每行都挂"✅ 存在"只是噪音）；只有异常才提示。
+          (x.check && x.check.state !== 'ok') ? dlBadge(x.check && x.check.state) : null,
+          // 任务反查来的记录属于别的项目（或没有项目），在这里「移除」会连带影响别处，所以不给按钮。
+          p.status !== 'deleted' && !x.derived
             ? h('button', {
                 type: 'button', style: C.unlinkBtn,
                 'data-action': 'ask-unlink-deliverable', 'data-for': x.id,
@@ -1110,14 +1271,43 @@ window.__ModuleLoader__.load({
                 onClick: () => { setDlErr(null); setDlUnlinkAsk({ id: x.id, project_id: p.id, title: x.title || x.id, rev: x.rev }) },
               }, '移除') : null,
         )
-        const deliverables = allDeliverables.map(dlRow)
+        const dlGroups = (() => {
+          const by = new Map()
+          for (const x of allDeliverables) {
+            const t = dlType(x)
+            if (!by.has(t)) by.set(t, [])
+            by.get(t).push(x)
+          }
+          return DL_ORDER.filter((t) => by.has(t)).map((t) => ({ type: t, items: by.get(t) }))
+        })()
+        const dlSummary = dlGroups.map((g) => g.type + ' ' + g.items.length).join(' · ')
+        const deliverables = dlGroups.length
+          ? dlGroups.map((g) => h('div', { key: 'dg' + g.type, 'data-dl-group': g.type },
+              h('div', { style: C.dlGroupHead }, g.type + ' · ' + g.items.length),
+              g.items.map(dlRow)))
+          : []
         const deadDeliverables = allDeliverables.filter((x) => x.check && x.check.state !== 'ok')
         const logs = (dd.logs || []).slice(0, 10).map((l) => h('div', { key: 'dl' + l.id, style: C.item },
           String(l.at || '').slice(0, 19).replace('T', ' ') + ' · ' + l.op
           + ' · ' + (l.source === 'run' ? '程序' : '人工')
           + ' · ' + (l.summary || '')))
-        const unconf = (dd.unconfirmed || []).map((u) => h('div', { key: 'du' + u.kind + u.id, style: C.item },
-          badge('inferred'), u.kind + ' · ' + (u.title || u.session_id || u.workspace_id || u.id) + ' · ' + (u.basis || '—')))
+        /**
+         * 依据区：这是**审计信息**，不是日常要看的。默认收起，点开才展开。
+         * 说清它是什么：系统按规则推断出来的归属，不是你确认过的；不影响数据正确性。
+         */
+        const kindWord = (k) => ({ project: '项目', session: '会话', workspace: '工作区', deliverable: '交付物', task: '任务' }[k] || k)
+        const unconfRows = (dd.unconfirmed || []).map((u) => h('div', { key: 'du' + u.kind + u.id, style: C.item },
+          // data-badge 保留（机检与浮层要靠它识别"推断项"），但显示文字用中文类别，不甩英文标签。
+          h('span', { style: Object.assign({}, C.tag, { color: '#b06000', marginRight: '6px' }), 'data-badge': 'inferred' }, kindWord(u.kind)),
+          h('span', null, u.title || u.session_id || u.workspace_id || u.id),
+          h('div', { style: C.sessId }, u.basis || '（没写依据）')))
+        const unconf = unconfRows.length
+          ? h('details', { 'data-basis-details': '1' },
+              h('summary', { style: C.taskSummary }, '展开查看 ' + unconfRows.length + ' 项（默认收起）'),
+              h('div', { style: Object.assign({}, C.projMeta, { margin: '6px 0' }) },
+                '这些是系统按规则推断出来的归属，不是你确认过的。它们不影响数据正确性，只是提示"这条关系没人点过头"。'),
+              unconfRows)
+          : []
         const sec = (key, title, count, body, emptyText, alwaysBody) => h('div', { 'data-section': key },
           h('div', { style: C.groupHead }, title + ' · ' + count),
           count === 0 ? h('div', null, h('div', { style: C.empty }, emptyText), alwaysBody ? body : null) : body)
@@ -1192,8 +1382,15 @@ window.__ModuleLoader__.load({
                 : null,
             ),
             '还没有关联工作区。点「关联工作区」从 DSH 的真实工作区里选。'),
-          sec('deliverables', '4 · 交付物', deliverables.length,
+          sec('tasks', '4 · 任务进度', tasks.length,
             h('div', null,
+              taskHead,
+              tasksAll.length ? null : h('div', { style: C.projMeta }, '还没有任务。把会话挂到本项目，那个会话负责的任务会自动出现在这里。'),
+              tasks),
+            '还没有任务。把会话挂到本项目，它负责的任务会自动出现在这里。'),
+          sec('deliverables', '5 · 交付物', allDeliverables.length,
+            h('div', null,
+              dlGroups.length ? h('div', { style: C.projMeta, 'data-dl-summary': '1' }, '共 ' + allDeliverables.length + ' 条 · ' + dlSummary) : null,
               deliverables,
               dlDone ? h('div', { style: C.done, 'data-dl-done': '1' }, dlDone) : null,
               dlErr ? h('div', { style: C.err, 'data-dl-error': '1' }, '交付物操作失败：' + dlErr) : null,
@@ -1201,11 +1398,11 @@ window.__ModuleLoader__.load({
               // 失效单独一块（UI 设计 §5）：列路径 + 最后成功时间 + 打开所在目录，只跳转不删。
               deadDeliverables.length
                 ? h('div', { style: C.recycle, 'data-dead-deliverables': '1' },
-                    h('div', { style: C.recycleHead }, '需要处理：' + deadDeliverables.length + ' 条交付物路径失效'),
+                    h('div', { style: C.recycleHead }, '需要处理：' + deadDeliverables.length + ' 条交付物现在打不开'),
                     deadDeliverables.map((x) => h('div', { key: 'dead' + x.id, style: C.proj, 'data-dead-id': x.id },
                       h('div', { style: C.projName }, x.title || x.id),
                       h('div', { style: C.dlMeta }, (x.check && x.check.pathHint) || (x.check && x.check.resolved) || '无路径'),
-                      h('div', { style: C.projMeta }, '状态：' + (x.check && x.check.state) + (x.check && x.check.mtime ? ' · 最后成功 ' + String(x.check.mtime).slice(0,16).replace('T',' ') : '')),
+                      h('div', { style: C.projMeta }, '状态：' + ((x.check && x.check.state) === 'missing' ? '文件不在了' : '打不开（可能是网络或盘没挂）') + (x.check && x.check.mtime ? ' · 最后成功 ' + String(x.check.mtime).slice(0,16).replace('T',' ') : '')),
                       h('button', {
                         type: 'button', style: C.pickBtn,
                         'data-action': 'open-deliverable-dir', 'data-for': x.id,
@@ -1234,8 +1431,8 @@ window.__ModuleLoader__.load({
                 }, '加交付物'),
               )
             : null,
-          sec('logs', '5 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
-          sec('basis', '6 · 依据（未确认）', unconf.length, unconf, '所有依据都已确认，没有待确认项。'),
+          sec('logs', '6 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
+          sec('basis', '7 · 系统推断的归属', unconfRows.length, unconf, '所有关系都是确认过的，没有推断项。'),
           h('div', { style: C.detailFull },
             h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情')),
         )

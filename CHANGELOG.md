@@ -8,6 +8,29 @@
 
 （暂无）
 
+## [0.15.0] - 2026-11-18
+
+### 新增
+
+- **Task / TaskSession 两张表**：台账（T-xxxx）迁移的目标模型。生命周期（`lifecycle`）与验收（`acceptance`）正交，任务可以独立于项目（`project_id=null`）。
+- **Task → Project 归属**：`project_id` + `project_basis` / `project_confidence`（confirmed｜inferred）/ `project_evidence`。规则只接受结构化证据（主会话的项目关联 + 时间窗否决），推断一律标 `inferred`。
+- **人工判定表（overrides）**：规则推断不出业务归属时用数据覆盖（`task-project-overrides.json`），脚本重跑不会把手改的覆盖回去。
+- **Deliverable 多任务引用**：一条路径一条记录，`task_ids[]` 表达多对多（不再按任务重复建档）。
+- **详情第 4 区「任务」**（只读）：按 `task.project_id` 列本项目任务，显示台账编号 / 标题 / 生命周期·验收 / 归属置信度；`inferred` 的任务同时进「依据（未确认）」清单。
+- **交付物按任务反查**：详情第 5 区除了 `deliverable.project_id` 直挂的记录，还会收「本项目任务产出的交付物」（`task_ids` 命中本项目任务）。这类记录标 `derived=true`，界面显示「来自任务」且不给「移除」按钮——移除会连带影响别的项目。**数据不改**，归属是读时推导的。
+- 分区编号顺延：4 任务 / 5 交付物 / 6 变更记录 / 7 依据。
+
+### 修复
+
+- **只读打开误判元数据损坏**：盘上 `global.json` 是 `{version, record}` 信封，表记录拆了信封、全局元数据没拆，导致任何正常域在只读模式下都被判 `metaState=corrupt`。已拆。
+- **对账第 7 条把合法的空归属当悬挂引用**：`deliverable.project_id` 允许为 `null`（如实留空），旧检查把 `null` 判成坏引用，整库永远一条红。已改为"空合法，非空必须找回且不在回收站"。
+- **对账新增第 11 条**：`task.project_id` 有效（可找回且不在回收站）。
+
+### 测试
+
+- 新增 s1c（38 项：归属规则 16 + 写入守卫/对账 19 + 只读信封 3）、s31（16 项：任务区与交付物反查）、s1a（86）、s1b-primary（17）、s1b-role-default（20）。
+- 全量 **514/514**（24 套全绿）。
+
 ## [0.14.1] - 2026-11-18
 
 ### 修复（真机首次验 v0.14.0 暴露）
