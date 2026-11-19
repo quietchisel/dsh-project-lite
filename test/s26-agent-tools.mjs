@@ -32,7 +32,7 @@ const ctx = {
 apply(ctx, { root: ROOT, evidencePath: join(BASE, 'ev.jsonl') })
 await new Promise((r) => setTimeout(r, 900)) // 等 loadDefineTool().then 注册完（它要遍历候选路径）
 
-push('T1', registered.size === 5 && TOOL_NAMES.every((n) => registered.has(n)), '五个工具都注册成功（实际 ' + [...registered.keys()].join(',') + '）')
+push('T1', TOOL_NAMES.every((n) => registered.has(n)), '所有注册工具都成功（' + TOOL_NAMES.length + ' 个，实际 ' + [...registered.keys()].join(',') + '）')
 push('T2', !!registered.get('project_list')?.description && !!registered.get('project_get')?.description, '工具有 description（Agent 据此判断何时用）')
 
 const list = registered.get('project_list')

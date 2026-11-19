@@ -8,6 +8,24 @@
 
 （暂无）
 
+## [0.17.0] - 2026-11-20
+
+### 新增（Project Continuity MVP：跨会话工作闭环）
+
+- **project_resume（Agent 只读工具）**：新会话快速恢复项目高信号摘要（目标/判据/下一步含过期提示/最新已确认检查点/待确认数/未决信号/会话与最终交付物引用/可信度汇总），摘要比 project_get 全量小约 40%。项目解析严格四规则：显式 id > 唯一 active primary 关联 > 多候选返回列表 > 无关联不加载，过滤软解绑关联，不猜项目。
+- **propose_checkpoint（Agent 受控写工具）**：Agent 完成阶段工作后提交待确认检查点（summary/completed/findings/next_action/open_questions），来源会话身份取自宿主 exec（不信模型参数），不改 Project 权威字段。
+- **checkpoint 正式表**：新增第 8 张表 checkpoint，纳入 expected_counts / Journal / 幂等 / 完整性闸 / 备份迁移；三态状态机 proposed→confirmed/rejected，确认/拒绝后内容不可变，记录确认时间与人来源（本地人工标记，不编造用户 ID）。
+- **UI「工作进展检查点」区（详情第 8 区）**：待确认检查点展示来源会话标题/摘要/已完成/发现/下一步/未决问题，提供「确认并保存」「拒绝」按钮；已确认检查点折叠展示；人可读标题注入；浅色/深色主题自适应。
+- **HTTP 路由**：GET /api/project/checkpoints（列表+来源标题）+ POST /api/project/checkpoint-confirm + /checkpoint-reject（人工确认/拒绝，不开放 Agent 工具，杜绝自我审批）。
+
+### 迁移
+
+- 新增 checkpoint 表向后兼容：旧库（无该目录、expected_counts 无该键）正常打开、数据不丢、不降级；首次写入后基线自动纳入。见交付包迁移说明。
+
+### 测试
+
+- 新增 s35-resume（8/8）、s36-checkpoint（8/8）、s37-checkpoint-e2e（7/7）、s38-checkpoint-ui（5/5）；s26 加工具注册动态断言；全量 31 套 31/31 通过。
+
 ## [0.16.1] - 2026-11-19
 
 ### 修复（详情交互）

@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { buildSpec, TABLES, VERSION, MetaSchema, initialMeta } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
-import { newProjectId, newDeliverableId, newLogId, linkKey, nowIso, validateNextAction } from './util.mjs'
+import { newProjectId, newDeliverableId, newLogId, newCheckpointId, linkKey, nowIso, validateNextAction } from './util.mjs'
 import { createJournal, fingerprintOf, canon, STATES as JOURNAL_STATES } from './journal.mjs'
 import { assertNoSpoofedActor, authorizeWrite, callerContext } from './identity.mjs'
 import { crashPoint, pausePoint } from './fault.mjs'
@@ -555,6 +555,66 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     },
 
     /**
+     * Continuity 0.1：工作进展检查点（正式表，纳入 expected_counts/Journal/幂等）。
+     * proposed 只是 Agent 建议，不改 Project 权威字段；confirmed/rejected 由人工确认路由调用。
+     * 确认后内容不可变：再次操作直接拒绝（要改就新建一条）。
+     */
+    async proposeCheckpoint({ project_id, source_session_id, source_session_role = 'primary', summary, completed, findings, next_action, open_questions, client_request_id } = {}) {
+      assertWritable()
+      const proj = dview.table('project').get(project_id)
+      if (!proj) throw new StoreError('PROJECT_NOT_FOUND', project_id)
+      if (proj.status === 'deleted') throw new StoreError('PROJECT_DELETED', '回收站项目不能提交检查点：' + project_id)
+      if (!source_session_id) throw new StoreError('SESSION_ID_REQUIRED', '检查点必须带来源会话（由 exec 注入）')
+      if (!['primary', 'supporting', 'branch'].includes(source_session_role)) throw new StoreError('INVALID_ROLE', 'source_session_role 只能是 primary/supporting/branch')
+      const s = String(summary ?? '').trim()
+      if (s.length < 2 || s.length > 500) throw new StoreError('INVALID_INPUT', 'summary 必填且 2-500 字')
+      const arr = (v) => Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean).slice(0, 20) : []
+      const id = newCheckpointId()
+      const now = nowIso()
+      const rec = {
+        id, project_id, source_session_id, source_session_role: source_session_role === 'branch' ? 'supporting' : source_session_role,
+        summary: s, status: 'proposed', created_at: now, rev: 1,
+      }
+      const c = arr(completed); if (c.length) rec.completed = c
+      const f2 = arr(findings); if (f2.length) rec.findings = f2
+      const oq = arr(open_questions); if (oq.length) rec.open_questions = oq
+      if (next_action && String(next_action).trim()) rec.next_action = String(next_action).trim().slice(0, 200)
+      assertRecord('checkpoint', rec)
+      await putJ('checkpoint', id, rec)
+      await writeLog('create', 'checkpoint', id, '提交检查点（待确认）：' + s.slice(0, 40), null, 1)
+      await refreshBaseline()
+      return { checkpoint: rec, changed: true }
+    },
+
+    /** 人工确认：proposed → confirmed，记录确认时间与来源；confirmed 后不可变。 */
+    async confirmCheckpoint({ id, confirmed_by } = {}) {
+      assertWritable()
+      const before = dview.table('checkpoint').get(id)
+      if (!before) throw new StoreError('CHECKPOINT_NOT_FOUND', '检查点不存在：' + id)
+      if (before.status !== 'proposed') throw new StoreError('CHECKPOINT_NOT_PROPOSED', '只有 proposed 状态可确认（当前 ' + before.status + '）；确认后不可变')
+      const next = { ...before, status: 'confirmed', confirmed_at: nowIso(), confirmed_by: String(confirmed_by || 'local-human-confirm'), rev: before.rev + 1 }
+      assertRecord('checkpoint', next)
+      await putJ('checkpoint', id, next)
+      await writeLog('update', 'checkpoint', id, '人工确认检查点', before.rev, next.rev)
+      await refreshBaseline()
+      return { checkpoint: next, changed: true }
+    },
+
+    /** 人工拒绝：proposed → rejected，保留原始内容与来源；不进 Resume 已确认进展。 */
+    async rejectCheckpoint({ id, rejected_by } = {}) {
+      assertWritable()
+      const before = dview.table('checkpoint').get(id)
+      if (!before) throw new StoreError('CHECKPOINT_NOT_FOUND', '检查点不存在：' + id)
+      if (before.status !== 'proposed') throw new StoreError('CHECKPOINT_NOT_PROPOSED', '只有 proposed 状态可拒绝（当前 ' + before.status + '）')
+      const next = { ...before, status: 'rejected', rejected_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('checkpoint', next)
+      await putJ('checkpoint', id, next)
+      await writeLog('update', 'checkpoint', id, '人工拒绝检查点' + (rejected_by ? '：' + String(rejected_by) : ''), before.rev, next.rev)
+      await refreshBaseline()
+      return { checkpoint: next, changed: true }
+    },
+
+    /**
      * 挂会话：确定性键 → **真幂等**。
      *
      * 三种情形，行为必须完全不同：
@@ -1026,6 +1086,8 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     taskSessions: () => visibleAll('task_session'),
     links: () => visibleAll('project_session'),
     logs: () => visibleAll('changelog'),
+    checkpoints: () => visibleAll('checkpoint'),
+    checkpoint: (id) => visibleRecord('checkpoint', id, dview.table('checkpoint').get(id)),
     deliverables: () => visibleAll('deliverable'),
     workspaces: () => visibleAll('project_workspace'),
     visibleAll,
@@ -1236,7 +1298,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   })
 
   // S1-A：所有写入口统一走 journal。嵌套写自动合并成同一个操作（createProject → linkSession）。
-  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime']
+  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime', 'proposeCheckpoint', 'confirmCheckpoint', 'rejectCheckpoint']
   for (const name of JOURNALED) {
     const impl = store[name]
     if (typeof impl !== 'function') continue

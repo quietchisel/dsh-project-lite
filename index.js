@@ -66,6 +66,11 @@ export const UNLINK_WORKSPACE_PATH = '/api/project/unlink-workspace'
 export const DELIVERABLE_PATH = '/api/project/deliverable'
 export const UNLINK_DELIVERABLE_PATH = '/api/project/unlink-deliverable'
 
+/** Continuity 0.1：检查点列表（GET）+ 人工确认/拒绝（POST 写）。确认必须由人在 UI 触发，不开放 Agent 工具。 */
+export const CHECKPOINTS_PATH = '/api/project/checkpoints'
+export const CONFIRM_CHECKPOINT_PATH = '/api/project/checkpoint-confirm'
+export const REJECT_CHECKPOINT_PATH = '/api/project/checkpoint-reject'
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -897,6 +902,82 @@ export function apply(ctx, config = {}) {
     },
   }))
 
+  // ---- Continuity 0.1：检查点列表（GET）----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: CHECKPOINTS_PATH,
+    handler: async (req, res) => {
+      const url = new URL(req.url || '', 'http://127.0.0.1')
+      const projectId = url.searchParams.get('project_id') || ''
+      const status = url.searchParams.get('status') || ''
+      try {
+        const s = await getStore()
+        await s.refresh()
+        let list = typeof s.checkpoints === 'function' ? s.checkpoints() : []
+        if (projectId) list = list.filter((c) => c.project_id === projectId)
+        if (status) list = list.filter((c) => c.status === status)
+        // 补来源会话标题（人可读），复用 registry.titlesOf，不落盘、不编造。
+        let titleMap = null
+        if (registry && typeof registry.titlesOf === 'function' && list.length) {
+          try { titleMap = await registry.titlesOf([...new Set(list.map((c) => c.source_session_id))]) } catch { titleMap = null }
+        }
+        const byId = (id) => titleMap ? (typeof titleMap.get === 'function' ? titleMap.get(id) : titleMap[id]) : null
+        const items = list.map((c) => ({ ...c, source_session_title: byId(c.source_session_id) || null }))
+          .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), total: items.length, checkpoints: items })
+      } catch (error) {
+        return writeJson(res, 500, errorBody('INTERNAL_ERROR', String(error && error.message ? error.message : error)))
+      }
+    },
+  }))
+
+  // 人工确认/拒绝：只接受 POST + JSON；本地人工标记来源，不编造用户 ID；走 claimRequest 幂等。
+  for (const [path, phase, method] of [
+    [CONFIRM_CHECKPOINT_PATH, 'checkpoint-confirm', 'confirmCheckpoint'],
+    [REJECT_CHECKPOINT_PATH, 'checkpoint-reject', 'rejectCheckpoint'],
+  ]) {
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + path))
+        const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+        if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+        let body
+        try { body = await readJsonBody(req) } catch (error) {
+          return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+        const id = typeof body.id === 'string' ? body.id.trim() : ''
+        if (!id) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: id'))
+        try {
+          const s = await getStore()
+          await s.refresh()
+          if (!s.writable) {
+            const d = s.degradationReport()
+            await evidence({ phase: phase + '-refused', kind: d.kind })
+            return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝操作：' + (d.title || d.kind)), degradation: d })
+          }
+          const actKey = JSON.stringify({ op: phase, id })
+          const human = 'local-human-confirm'
+          const claimed = await s.claimRequest(body.requestId, actKey, () =>
+            method === 'confirmCheckpoint'
+              ? s.confirmCheckpoint({ id, confirmed_by: human })
+              : s.rejectCheckpoint({ id, rejected_by: human }))
+          const out = claimed.value
+          await evidence({ phase: phase + '-served', id, replayed: claimed.replayed })
+          return writeJson(res, 200, { ok: true, at: new Date().toISOString(), checkpoint: out.checkpoint, replayed: claimed.replayed })
+        } catch (error) {
+          const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+          const message = String(error && error.message ? error.message : error)
+          const httpStatus = code === 'READONLY_DEGRADED' || code === 'REQUEST_ID_CONFLICT' || code === 'CHECKPOINT_NOT_PROPOSED' ? 409
+            : code === 'CHECKPOINT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+          await evidence({ phase: phase + '-error', code, message })
+          return writeJson(res, httpStatus, errorBody(code, message))
+        }
+      },
+    }))
+  }
   // 卸载/关闭：先撤全部路由，再关自己的域（共享 facility 时绝不 closeAll）。
   ctx.effect(() => async () => {
     if (disposeTools) { try { disposeTools() } catch {} }

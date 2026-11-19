@@ -226,6 +226,30 @@ export const TaskSessionSchema = z.object({
   rev: z.number().int().positive(),
 })
 
+/**
+ * Continuity 0.1：工作进展检查点（跨会话连续性的权威历史记录）。
+ * 三态：proposed（Agent 提出）/ confirmed（人工确认，成为 Resume 权威进展）/ rejected（保留但不进 Resume）。
+ * 确认后内容不可变：要修正就新建一条，不就地改。
+ * source_session_id 必须来自宿主 exec，不由模型参数传入（agent-tools 层保证）。
+ */
+export const CheckpointSchema = z.object({
+  id: z.string().regex(/^cp_[0-9A-HJKMNP-TV-Z]{26}$/),
+  project_id: z.string().min(1),
+  source_session_id: z.string().min(1),
+  source_session_role: z.enum(['primary', 'supporting', 'branch']),
+  summary: z.string().min(1).max(500),
+  completed: z.array(z.string()).max(20).optional(),
+  findings: z.array(z.string()).max(20).optional(),
+  next_action: z.string().max(200).optional(),
+  open_questions: z.array(z.string()).max(20).optional(),
+  status: z.enum(['proposed', 'confirmed', 'rejected']),
+  created_at: Iso,
+  confirmed_at: Iso.optional(),
+  confirmed_by: z.string().optional(),
+  rejected_at: Iso.optional(),
+  rev: z.number().int().positive(),
+})
+
 /** 全局单例。注意 defineDomain 拒绝"能接受 null 的 global schema"。 */
 export const MetaSchema = z.object({
   schema_version: z.number().int().nonnegative(),
@@ -270,7 +294,7 @@ export const initialMeta = (writer) => ({
   prefs: { suppress_suggest: false, suppress_until: null },
 })
 
-export const TABLES = ['project', 'project_session', 'changelog', 'project_workspace', 'deliverable', 'task', 'task_session']
+export const TABLES = ['project', 'project_session', 'changelog', 'project_workspace', 'deliverable', 'task', 'task_session', 'checkpoint']
 
 /**
  * @param extraProject 仅用于版本兼容实验：给 project 增加可选字段（模拟"v2 新增字段"）。
@@ -290,6 +314,7 @@ export function buildSpec({ version = VERSION, compatibleVersions, writer = 'dsh
       deliverable: domainTable(DeliverableSchema),
       task: domainTable(TaskSchema),
       task_session: domainTable(TaskSessionSchema),
+      checkpoint: domainTable(CheckpointSchema),
     },
   }
   if (compatibleVersions !== undefined) spec.compatibleVersions = compatibleVersions

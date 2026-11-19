@@ -67,6 +67,10 @@ const API_STATE = 'api/project/state'
     const API_DELIVERABLE = 'api/project/deliverable'
     const API_UNLINK_DELIVERABLE = 'api/project/unlink-deliverable'
     const API_LINKS_OF_SESSION = 'api/project/links-of-session'
+    // Continuity 0.1：检查点列表 + 人工确认/拒绝（确认由 UI 主动触发，不开放 Agent 工具）
+    const API_CHECKPOINTS = 'api/project/checkpoints'
+    const API_CP_CONFIRM = 'api/project/checkpoint-confirm'
+    const API_CP_REJECT = 'api/project/checkpoint-reject'
 
     /**
      * 1.8：一次"用户意图"一个 requestId。
@@ -367,6 +371,10 @@ const API_STATE = 'api/project/state'
       const [dlBusy, setDlBusy] = useState(false)
       // 交付物解除确认 {id, title, rev}
       const [dlUnlinkAsk, setDlUnlinkAsk] = useState(null)
+      // Continuity 0.1：工作进展检查点（待确认列表 + 人工确认/拒绝）。
+      const [checkpoints, setCheckpoints] = useState([])
+      const [cpBusy, setCpBusy] = useState(null)   // 正在操作的 checkpoint id
+      const [cpMsg, setCpMsg] = useState(null)     // 操作反馈 {ok, text}
 
       /**
        * 提交新建。三条铁律：
@@ -465,6 +473,40 @@ const API_STATE = 'api/project/state'
       // 0.13：表单的「初始工作区」下拉需要候选，挂载后拉一次（空查询列全部）。
       useEffect(() => { loadWorkspaces('') }, [loadWorkspaces])
 
+      /** Continuity 0.1：拉项目检查点列表（只读），供详情「工作进展检查点」区展示。 */
+      const loadCheckpoints = useCallback(async (projectId) => {
+        try {
+          const res = await fetch(API_CHECKPOINTS + '?project_id=' + encodeURIComponent(projectId), { cache: 'no-store' })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          setCheckpoints(json && json.ok && Array.isArray(json.checkpoints) ? json.checkpoints : [])
+        } catch (e) { setCheckpoints([]) }
+      }, [])
+
+      /** 人工确认/拒绝检查点（UI 主动触发；重复点击靠 cpBusy + 后端幂等双重防重复写）。 */
+      const submitCheckpointAction = useCallback(async (cp, action) => {
+        if (cpBusy) return
+        setCpBusy(cp.id); setCpMsg(null)
+        const api = action === 'confirm' ? API_CP_CONFIRM : API_CP_REJECT
+        try {
+          const res = await fetch(api, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: cp.id, requestId: newRequestId() }),
+          })
+          let json = null
+          try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setCpMsg({ ok: true, text: (action === 'confirm' ? '已确认检查点' : '已拒绝检查点') })
+            if (detail && detail.id) await loadCheckpoints(detail.id)
+          } else {
+            setCpMsg({ ok: false, text: (json && json.error && json.error.message) || (json && json.error && json.error.code) || ('HTTP ' + res.status) })
+          }
+        } catch (e) {
+          setCpMsg({ ok: false, text: String(e && e.message ? e.message : e) })
+        } finally { setCpBusy(null) }
+      }, [cpBusy, detail, loadCheckpoints])
+
       /** 打开项目详情（六分区）。失败只写 detail.err，不动主面板。 */
       const openDetail = useCallback(async (p) => {
         setDetail({ id: p.id, data: null, err: null })
@@ -472,7 +514,7 @@ const API_STATE = 'api/project/state'
           const res = await fetch(API_GET + '?id=' + encodeURIComponent(p.id), { cache: 'no-store' })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
-          if (json && json.ok) setDetail({ id: p.id, data: json, err: null })
+          if (json && json.ok) { setDetail({ id: p.id, data: json, err: null }); setCpMsg(null); loadCheckpoints(p.id) }
           else {
             const er = json && json.error
             setDetail({ id: p.id, data: null, err: (er && (er.message || er.code)) || ('HTTP ' + res.status) })
@@ -480,7 +522,7 @@ const API_STATE = 'api/project/state'
         } catch (e) {
           setDetail({ id: p.id, data: null, err: String(e && e.message ? e.message : e) })
         }
-      }, [])
+      }, [loadCheckpoints])
 
       /** 0.16.1：点项目标题直接开详情弹窗——先占位 modal，再异步把数据加载进 detail。 */
       const openModal = useCallback((p) => {
@@ -1581,6 +1623,56 @@ const API_STATE = 'api/project/state'
             : null,
           sec('logs', '6 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '7 · 系统推断的归属', unconfRows.length, unconf, '所有关系都是确认过的，没有推断项。'),
+          // Continuity 0.1：工作进展检查点（8 区，非 sec 编号避免触碰 s19/s31 断言）。
+          h('div', { style: C.detailFull, 'data-section': 'checkpoints', 'data-checkpoints': '1' },
+            (() => {
+              const list = Array.isArray(checkpoints) ? checkpoints : []
+              const proposed = list.filter((c) => c && c.status === 'proposed')
+              const confirmed = list.filter((c) => c && c.status === 'confirmed')
+              const cpRow = (c) => h('div', {
+                key: c.id,
+                style: Object.assign({}, C.statCard, { margin: '6px 0', flexDirection: 'column', alignItems: 'stretch' }),
+                'data-checkpoint-id': c.id, 'data-checkpoint-status': c.status,
+              },
+                h('div', { style: C.statLabel },
+                  (c.status === 'confirmed' ? '已确认' : c.status === 'rejected' ? '已拒绝' : '待确认')
+                  + ' · ' + (c.source_session_title || (c.source_session_id ? ('会话 ' + String(c.source_session_id).slice(7, 15)) : '未知来源'))
+                  + ' · ' + (c.created_at ? String(c.created_at).slice(0, 16).replace('T', ' ') : '')),
+                h('div', { style: { fontSize: '12px', lineHeight: '1.6', margin: '4px 0' } }, String(c.summary || '')),
+                Array.isArray(c.completed) && c.completed.length
+                  ? h('div', { style: C.projMeta }, '已完成：' + c.completed.join('；')) : null,
+                Array.isArray(c.findings) && c.findings.length
+                  ? h('div', { style: C.projMeta }, '发现：' + c.findings.join('；')) : null,
+                c.next_action ? h('div', { style: C.projMeta }, '下一步建议：' + c.next_action) : null,
+                Array.isArray(c.open_questions) && c.open_questions.length
+                  ? h('div', { style: C.projMeta }, '未决问题：' + c.open_questions.join('；')) : null,
+                c.status === 'proposed'
+                  ? h('div', { style: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
+                      h('button', {
+                        type: 'button', style: C.btn, 'data-action': 'confirm-checkpoint', 'data-for': c.id,
+                        disabled: !!cpBusy,
+                        onClick: () => submitCheckpointAction(c, 'confirm'),
+                      }, cpBusy === c.id ? '处理中…' : '确认并保存'),
+                      h('button', {
+                        type: 'button', style: C.pickBtn, 'data-action': 'reject-checkpoint', 'data-for': c.id,
+                        disabled: !!cpBusy,
+                        onClick: () => submitCheckpointAction(c, 'reject'),
+                      }, cpBusy === c.id ? '处理中…' : '拒绝'))
+                  : null,
+              )
+              return h('div', null,
+                h('div', { style: C.groupHead }, '8 · 工作进展检查点 · 待确认 ' + proposed.length + ' / 已确认 ' + confirmed.length),
+                cpMsg ? h('div', { style: cpMsg.ok ? C.ok : C.err, role: 'status' }, cpMsg.text) : null,
+                proposed.length ? proposed.map(cpRow)
+                  : h('div', { style: C.empty }, '没有待确认的检查点。Agent 完成阶段工作后，检查点会在这里等待你确认。'),
+                confirmed.length
+                  ? h('details', { style: { marginTop: '6px' } },
+                      h('summary', { style: C.taskSummary }, '展开查看 ' + confirmed.length + ' 条已确认进展（默认收起）'),
+                      confirmed.map(cpRow))
+                  : null,
+              )
+            })()
+          ),
         )
       })() : null }
 

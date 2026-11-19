@@ -16,6 +16,7 @@ export function ulid(now = Date.now()) {
 export const newProjectId = () => 'prj_' + ulid()
 export const newDeliverableId = () => 'dlv_' + ulid()
 export const newLogId = () => 'log_' + ulid()
+export const newCheckpointId = () => 'cp_' + ulid()
 
 /** 连接表确定性键：<pid>__<sid>（不能含 # —— per-record 键必须是 [a-zA-Z0-9_-]+）。 */
 export const linkKey = (projectId, sessionId) => projectId + '__' + sessionId

@@ -338,5 +338,96 @@ export function createReadService(store, options = {}) {
     return snapshot({ ok: true, q: String(q ?? ''), status, total: hits.length, hits, ...common() })
   }
 
-  return { overview, getProject, linksOfSession, search }
+  /**
+   * Continuity 0.1：项目上下文恢复摘要（高信号，控制 token）。
+   * 复用 getProject 的归属计算，但只输出 Resume 需要的字段；不返回全量 changelog / 会话正文 / 交付物正文。
+   * opts.checkpoints：可选的 checkpoint 记录数组（Sprint 2 接入）；没有就返回空，不编造。
+   * @param {string} id 项目 id
+   * @param {{checkpoints?:Array, sessionId?:string}} opts
+   */
+  async function resume(id, opts = {}) {
+    const detail = await getProject(id)
+    if (!detail.found) return snapshot({ ok: true, found: false, project_id: id, ...common() })
+    const p = detail.project
+    const cps = Array.isArray(opts.checkpoints) ? opts.checkpoints : []
+    const confirmed = cps
+      .filter((c) => c && c.project_id === id && c.status === 'confirmed')
+      .sort((a, b) => String(b.confirmed_at || b.created_at || '').localeCompare(String(a.confirmed_at || a.created_at || '')))
+    const pending = cps.filter((c) => c && c.project_id === id && c.status === 'proposed')
+    const latest = confirmed[0] || null
+    // 未决信号：来自任务的 active + implemented_unverified（做完待验），标 inferred，不当成人工确认。
+    const openSignals = (detail.tasks || [])
+      .filter((t) => t.lifecycle === 'active' || t.acceptance === 'implemented_unverified')
+      .map((t) => ({
+        task_id: t.id,
+        source_id: t.source_id || null,
+        title: t.title,
+        acceptance: t.acceptance,
+        source: t.project_source || null, // 'confirmed' | 'session'(inferred) | null
+      }))
+    // 最终交付物：只引用（id + title + 三态），不返回正文/路径全文。
+    const finals = (detail.deliverables || []).filter((d) => d.is_final === true)
+    const relevantDeliverables = finals.slice(0, 8).map((d) => ({
+      id: d.id,
+      title: d.title,
+      kind: d.kind || null,
+      state: d.check && d.check.state ? d.check.state : (d.state || null),
+    }))
+    // 相关会话：带人可读标题，只取 id/title/role，不含正文。
+    const relevantSessions = (detail.sessions || []).slice(0, 8).map((l) => ({
+      session_id: l.session_id,
+      title: l.title || null,
+      role: l.role || null,
+      confidence: l.confidence || null,
+    }))
+    // 可信度汇总：本项目维度 + 会话/交付物未确认 + 任务归属 inferred（project_source='session'）。
+    const inferredTasks = (detail.tasks || []).filter((t) => t.project_source === 'session').length
+    const confidenceSummary = {
+      project: p.confidence || 'none',
+      sessions_confirmed: (detail.sessions || []).filter((l) => l.confidence === 'confirmed').length,
+      sessions_inferred: (detail.sessions || []).filter((l) => l.confidence === 'inferred').length,
+      tasks_confirmed: (detail.tasks || []).filter((t) => t.project_source === 'confirmed').length,
+      tasks_inferred: inferredTasks,
+      tasks_unlinked: 0, // 动态归属下无归属任务不进入本项目详情，未关联不混入 inferred
+    }
+    // unconfirmed_count 只数真正 inferred 的（绝不把无归属 none 算进来）。
+    const unconfirmedCount = (detail.unconfirmed || []).length + inferredTasks
+    // next_action 更新时间与过期提示：项目 updated_at 作为最近维护时间；超过 14 天提示可能过期。
+    let nextActionStale = null
+    try {
+      const t = Date.parse(p.updated_at || '')
+      if (Number.isFinite(t)) {
+        const days = Math.floor((Date.now() - t) / 86400000)
+        nextActionStale = days >= 14 ? { stale: true, days } : { stale: false, days }
+      }
+    } catch {}
+    return snapshot({
+      ok: true,
+      found: true,
+      project_id: p.id,
+      name: p.name,
+      status: p.status,
+      confidence: p.confidence || 'none',
+      objective: p.objective || null,
+      done_when: Array.isArray(p.done_when) ? p.done_when : [],
+      next_action: p.next_action || null,
+      next_action_updated_at: p.updated_at || null,
+      next_action_stale: nextActionStale,
+      latest_confirmed_checkpoint: latest ? {
+        id: latest.id, summary: latest.summary || null, next_action: latest.next_action || null,
+        source_session_id: latest.source_session_id || null, confirmed_at: latest.confirmed_at || null,
+      } : null,
+      pending_checkpoint_count: pending.length,
+      open_signals: openSignals,
+      session_count: detail.counts.sessions || 0,
+      relevant_sessions: relevantSessions,
+      final_deliverable_count: finals.length,
+      relevant_deliverable_refs: relevantDeliverables,
+      unconfirmed_count: unconfirmedCount,
+      confidence_summary: confidenceSummary,
+      ...common(),
+    })
+  }
+
+  return { overview, getProject, linksOfSession, search, resume }
 }

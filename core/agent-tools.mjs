@@ -16,7 +16,7 @@
 
 import { resolveHostSessionId, runAsCaller } from './identity.mjs'
 
-const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create']
+const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint']
 
 /**
  * 唯一身份来源：宿主 exec。写入类工具一律包在 runAsCaller 里，
@@ -103,6 +103,44 @@ export function registerAgentTools(ctx, deps) {
       const r = await readService(s, { titlesOf: deps.titlesOf, registry: deps.registry }).getProject(args.project_id)
       if (evidence) evidence({ phase: 'tool-project-get', id: args.project_id, found: r.found })
       return r
+    },
+  })
+
+  // ---- Continuity 0.1 只读：项目上下文恢复（高信号摘要，与 project_get 全量详情区分）----
+  reg({
+    name: 'project_resume',
+    description: '恢复一个长期项目的工作上下文（只读）。返回高信号摘要：目标/完成判据/下一步(含过期提示)/最新已确认检查点/待确认数/未决信号/会话与最终交付物引用/可信度汇总。与 project_get 的区别：resume 是小摘要，用于新会话快速接续；project_get 是全量详情。不传 project_id 时按当前会话的有效关联解析，绝不猜项目。不用于查看全量变更历史或交付物正文。',
+    parameters: {
+      project_id: { type: 'string', description: '可选：项目 id（prj_…）。不传则按当前会话关联解析' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const s = await getStore()
+      await s.refresh()
+      const sid = callerSid(exec)
+      let pid = args && args.project_id ? String(args.project_id) : null
+      // A2 项目解析规则
+      if (!pid) {
+        if (!sid) return { ok: true, found: false, state: 'no_identity', message: '未提供 project_id，且当前调用不在会话里，无法解析项目', candidates: [] }
+        const links = (typeof s.links === 'function' ? s.links() : []).filter((l) => l && l.session_id === sid && l.unlinked !== true && l.role === 'primary')
+        const projects = typeof s.projects === 'function' ? s.projects() : []
+        const active = links.map((l) => projects.find((p) => p.id === l.project_id)).filter((p) => p && p.status === 'active')
+        if (active.length === 0) return { ok: true, found: false, state: 'no_association', message: '当前会话没有有效的 active primary 项目关联', candidates: [] }
+        if (active.length > 1) {
+          return { ok: true, found: false, state: 'multiple_candidates', message: '当前会话关联多个项目，请明确指定 project_id', candidates: active.map((p) => ({ id: p.id, name: p.name, status: p.status })) }
+        }
+        pid = active[0].id
+      }
+      // 存在性 + 状态检查（deleted 不恢复）
+      const target = typeof s.project === 'function' ? s.project(pid) : null
+      if (!target) return { ok: false, error: 'PROJECT_NOT_FOUND', message: '项目不存在：' + pid }
+      if (target.status === 'deleted') return { ok: false, error: 'PROJECT_DELETED', message: '项目在回收站（deleted），不恢复上下文：' + pid }
+      const checkpoints = typeof s.checkpoints === 'function' ? s.checkpoints() : []
+      const svc = readService(s, { titlesOf: deps.titlesOf, registry: deps.registry })
+      const out = await svc.resume(pid, { checkpoints, sessionId: sid })
+      if (evidence) evidence({ phase: 'tool-project-resume', id: pid, found: out.found })
+      return out
     },
   })
 
@@ -201,6 +239,54 @@ export function registerAgentTools(ctx, deps) {
       } catch (e) {
         const code = e && e.code ? e.code : 'CREATE_FAILED'
         return { ok: false, error: code, message: String(e && e.message ? e.message : e) }
+      }
+    },
+  })
+
+  // ---- Continuity 0.1 受控写：提交工作进展检查点（人确认后才成为 Resume 权威进展）----
+  reg({
+    name: 'propose_checkpoint',
+    description: '提交一份工作进展检查点（proposed 状态，需人工在面板确认或拒绝）。完成阶段工作后调用：总结做了什么、发现、下一步建议、未决问题。与 project_link_session/project_create 的区别：它不改项目权威字段，只追加一条待确认进展记录。来源会话身份自动取自执行上下文，不接受模型传入的 source_session_id。不要用于自我审批——确认必须由人在 UI 完成。重复调用相同内容（带相同 requestId）不会产生重复记录。',
+    parameters: {
+      project_id: { type: 'string', description: '项目 id（prj_…）' },
+      summary: { type: 'string', description: '本次工作摘要（2-500 字）' },
+      completed: { type: 'array', description: '已完成事项列表（可选）' },
+      findings: { type: 'array', description: '重要发现列表（可选）' },
+      next_action: { type: 'string', description: '建议的下一步（可选，需人工确认）' },
+      open_questions: { type: 'array', description: '未决问题列表（可选）' },
+      requestId: { type: 'string', description: '可选幂等 id，相同 id 重复提交不重复创建' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.project_id) return { ok: false, error: 'PROJECT_ID_REQUIRED' }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份，拒绝提交检查点' }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
+      try {
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:checkpoint' }, () =>
+          s.proposeCheckpoint({
+            project_id: args.project_id,
+            source_session_id: hostSid,          // 身份只来自 exec，不信参数
+            source_session_role: (() => {          // 实际角色查关联，不硬编码；查不到保守记 supporting
+              const ls = (typeof s.links === 'function' ? s.links() : []).filter((l) => l && l.session_id === hostSid && l.project_id === args.project_id && l.unlinked !== true)
+              const mine = ls.find((l) => l.role === 'primary') || ls[0]
+              return mine ? mine.role : 'supporting'
+            })(),
+            summary: args.summary,
+            completed: args.completed,
+            findings: args.findings,
+            next_action: args.next_action,
+            open_questions: args.open_questions,
+            client_request_id: args.requestId,
+          }))
+        if (evidence) evidence({ phase: 'tool-propose-checkpoint', project: args.project_id, id: r.checkpoint && r.checkpoint.id })
+        return { ok: true, checkpoint: r.checkpoint, message: '检查点已提交（proposed），请在项目面板确认或拒绝' }
+      } catch (e) {
+        return { ok: false, error: e && e.code ? e.code : 'CHECKPOINT_FAILED', message: String(e && e.message ? e.message : e) }
       }
     },
   })
