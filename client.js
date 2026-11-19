@@ -90,6 +90,28 @@ const API_STATE = 'api/project/state'
       redBody: { fontSize: '12px', lineHeight: '18px' },
       ok: { border: '1px solid #1e8e3e', background: '#e6f4ea', color: '#0d652d', borderRadius: '8px', padding: '8px 12px', marginBottom: '12px', fontSize: '12px' },
       section: { border: '1px solid rgba(128,128,128,0.28)', borderRadius: '8px', padding: '10px 12px' },
+  // 0.16.0 UI 改造：token 化 + 卡片化 + 可视化。只加新键，不改任何既有键（s19/s31 依赖原样式）。
+  statGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: '8px', margin: '8px 0 12px' },
+  statCard: { border: '1px solid rgba(128,128,128,0.28)', borderRadius: '12px', padding: '8px 9px', display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
+  statLabel: { fontSize: '11px', fontWeight: 600, opacity: 0.68, lineHeight: '15px' },
+  statValue: { fontSize: '20px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', lineHeight: '26px' },
+  statSub: { fontSize: '11px', opacity: 0.62, lineHeight: '15px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  vizWrap: { position: 'relative', width: '96px', height: '96px', flex: 'none' },
+  vizSvg: { width: '96px', height: '96px', transform: 'rotate(-90deg)' },
+  vizCenter: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
+  vizNum: { fontSize: '18px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', lineHeight: '22px' },
+  vizCap: { fontSize: '10px', opacity: 0.66 },
+  vizLegend: { display: 'flex', flexWrap: 'wrap', gap: '4px 10px', fontSize: '11px', alignItems: 'center' },
+  vizDot: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '2px', marginRight: '4px', verticalAlign: 'middle' },
+  vizRow: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
+  // 0.16.0 项目卡片：左侧状态色条 + 右侧内容（第三方插件「双轨卡片」手法），不改原 C.proj。
+  projCard: { position: 'relative', border: '1px solid rgba(128,128,128,0.28)', borderRadius: '12px', padding: '8px 10px 8px 13px', marginBottom: '8px', overflow: 'hidden' },
+  projStripe: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '3px' },
+  projCardHead: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' },
+  projCardActs: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' },
+  modalBox: { background: 'Canvas', color: 'CanvasText', border: '1px solid rgba(128,128,128,0.4)', borderRadius: '12px', padding: '14px 16px', width: 'min(1100px, 94vw)', maxHeight: '86vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 36px rgba(0,0,0,0.32)' },
+  modalHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', paddingBottom: '8px', borderBottom: '1px solid rgba(128,128,128,0.22)', marginBottom: '8px' },
+  modalBody: { overflowY: 'auto', flex: '1 1 auto', minHeight: 0 },
   // 0.15.0 任务区：状态色 + 一行标题（summary 去掉默认三角对齐问题）
   taskSummary: { display: 'flex', alignItems: 'baseline', gap: '8px', cursor: 'pointer', lineHeight: '1.6' },
   taskTitle: { flex: '1 1 auto', minWidth: 0 },
@@ -210,6 +232,43 @@ const API_STATE = 'api/project/state'
     const deliverableRequest = createLinkRequest()
 
     function Panel() {
+      const statCard = (label, value, sub) => h('div', { style: C.statCard, 'data-stat-card': label },
+      h('span', { style: C.statLabel }, label),
+      h('span', { style: C.statValue }, value == null ? '—' : String(value)),
+      sub != null ? h('span', { style: C.statSub, title: String(sub) }, String(sub)) : null)
+      const donut = (segments, total, caption) => {
+      const sum = segments.reduce((a, s) => a + Math.max(0, s.value), 0)
+      let acc = 0
+      const circles = segments.map((s, i) => {
+      const v = Math.max(0, s.value)
+      const len = sum > 0 ? (v / sum) * 100 : 0
+      const off = -acc
+      acc += len
+      return h('circle', {
+      key: 'seg' + i, cx: '21', cy: '21', r: '15.9155', fill: 'transparent',
+      stroke: s.color, strokeWidth: '4', strokeDasharray: len + ' ' + (100 - len),
+      strokeDashoffset: String(off), 'data-viz-seg': s.label,
+      })
+      })
+      return h('div', { style: C.vizWrap, 'data-viz-donut': caption || '' },
+      h('svg', { viewBox: '0 0 42 42', style: C.vizSvg, role: 'img', 'aria-label': caption || '分布图' }, circles),
+      h('div', { style: C.vizCenter },
+      h('span', { style: C.vizNum }, total == null ? sum : String(total)),
+      caption ? h('span', { style: C.vizCap }, caption) : null))
+      }
+      const legend = (segments) => h('div', { style: C.vizLegend, 'data-viz-legend': '1' },
+      segments.map((s) => h('span', { key: 'lg' + s.label },
+      h('i', { style: Object.assign({}, C.vizDot, { background: s.color }) }),
+      s.label + ' ' + s.value)))
+      const bulletRow = (label, value, max, color) => {
+      const pct = max > 0 ? Math.round((value / max) * 100) : 0
+      return h('div', { key: 'br' + label, style: { marginBottom: '5px', fontSize: '11px' }, 'data-viz-bar': label },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between' } },
+      h('span', null, label), h('span', { style: C.num }, value)),
+      h('div', { style: { height: '6px', borderRadius: '3px', background: 'rgba(128,128,128,0.16)', overflow: 'hidden', marginTop: '2px' } },
+      h('div', { style: { height: '100%', width: pct + '%', background: color || '#4176e6', borderRadius: '3px' } })))
+      }
+
       const [data, setData] = useState(null)
       const [error, setError] = useState(null)
       const [busy, setBusy] = useState(false)
@@ -274,6 +333,8 @@ const API_STATE = 'api/project/state'
       const [detail, setDetail] = useState(null)
       // 列表行「未确认」徽标点开的依据浮层（只服务一条项目）。
       const [basisFor, setBasisFor] = useState(null)
+      // 0.16.0：点项目卡片弹出详情窗（与内嵌详情共存，不动 s19 的内嵌断言）。
+      const [modalFor, setModalFor] = useState(null)
       // 归档二次确认：存 {id, name, rev}，用户点确认才真发请求。
       const [archiveAsk, setArchiveAsk] = useState(null)
       const [archiveErr, setArchiveErr] = useState(null)
@@ -814,7 +875,13 @@ const API_STATE = 'api/project/state'
           const items = Array.isArray(g.items) ? g.items : []
           rows.push(h('div', { key: 'g' + g.key, style: C.groupHead }, (g.key || '?') + ' · ' + items.length))
           for (const p of items) {
-            rows.push(h('div', { key: 'p' + p.id, style: C.proj, 'data-project-id': p.id },
+            // 0.16.0 项目卡片化：外层卡片 + 左侧状态色条；内部元素/属性一个不动（s19/s31 依赖）。
+            const stripeColor = p.status === 'deleted' ? '#b3261e'
+              : p.status === 'archived' ? 'rgba(128,128,128,0.75)'
+              : p.status === 'paused' ? '#b06000' : '#1e8e3e'
+            rows.push(h('div', { key: 'p' + p.id, style: C.projCard, 'data-project-id': p.id, 'data-project-card': '1' },
+              h('div', { style: Object.assign({}, C.projStripe, { background: stripeColor }), 'data-viz-stripe': p.status || '' }),
+              h('div', { style: C.proj },
               h('div', { style: C.projName },
                 h('button', {
                   type: 'button',
@@ -846,15 +913,31 @@ const API_STATE = 'api/project/state'
                     onClick: () => openLink(p),
                   }, '关联会话')
                 : null,
-            ))
+                 // 0.16.0 弹窗详情入口（与内嵌详情共存，不动 s19 的内嵌断言）。
+                 h('button', {
+                   type: 'button', style: C.pickBtn, 'data-action': 'open-modal', 'data-for': p.id,
+                   'aria-label': '弹窗查看 ' + (p.name || p.id),
+                   onClick: () => setModalFor(p),
+                 }, '弹窗详情'),
+               )))
             // v0.10.2：详情内嵌到被点项目行正下方，项目多时标题与详情不分离。
             if (detail && detail.id === p.id) {
               rows.push(h('div', { key: 'detail-' + p.id, 'data-detail-slot': p.id, style: { margin: '4px 0 8px' } }, renderDetail()))
             }
           }
         }
+        // 0.16.0 全局 KPI 卡（对标「上下文洞察」顶部统计行）：数字全来自 overview.counts，不编造。
+        const oc = ovData.counts || {}
+        const globalKpis = h('div', { style: C.statGrid, 'data-viz-global-kpis': '1' },
+          statCard('当前项目', total, (oc.deleted || 0) ? ('另有回收站 ' + oc.deleted + ' 个') : '无回收站项目'),
+          statCard('进行中', oc.active || 0, '活跃项目'),
+          statCard('已归档', oc.archived || 0, '暂存归档'),
+          statCard('已删除', oc.deleted || 0, '回收站可恢复'),
+          statCard('暂停/完成', (oc.paused || 0) + (oc.done || 0), '暂停 ' + (oc.paused || 0) + ' · 完成 ' + (oc.done || 0)),
+          statCard('数据域', readOnly ? '只读' : '可写', readOnly ? '写入被拒' : '可正常写入'))
         return h('div', { style: C.list, 'data-overview-state': readOnly ? 'readonly' : (total === 0 ? 'empty' : 'ready') },
           h('div', { style: C.listTitle }, '项目列表（共 ' + total + ' 条）'),
+          globalKpis,
           ovNotice,
           readOnly
             ? h('div', { style: Object.assign({}, C.notice, C.warn) },
@@ -1096,6 +1179,27 @@ const API_STATE = 'api/project/state'
       ) : null
 
       /**
+       * 0.16.0 项目详情弹窗：与内嵌详情共存。
+       * 复用 renderDetail()、C.overlayMask；点击卡片上的「弹窗详情」打开。
+       * Esc 关闭：mask 自身 tabIndex=0 + onKeyDown，不引入 useEffect（测试 harness 不执行 effect 清理）。
+       */
+      function renderModal() { return modalFor ? h('div', {
+        style: C.overlayMask, 'data-modal-overlay': '1', role: 'dialog', 'aria-modal': 'true',
+        'aria-label': '项目详情：' + (modalFor.name || modalFor.id),
+        tabIndex: 0,
+        onKeyDown: (e) => { if (e.key === 'Escape') setModalFor(null) },
+        onClick: (e) => { if (e.target === e.currentTarget) setModalFor(null) },
+      },
+        h('div', { style: C.modalBox, onClick: (e) => e.stopPropagation() },
+          h('div', { style: C.modalHead },
+            h('div', { style: C.formTitle }, '详情：' + (modalFor.name || modalFor.id)),
+            h('button', { type: 'button', style: C.btn, 'data-action': 'close-modal', autoFocus: true,
+              onKeyDown: (e) => { if (e.key === 'Escape') setModalFor(null) },
+              onClick: () => setModalFor(null) }, '关闭 (Esc)')),
+          h('div', { style: C.modalBody }, renderDetail())))
+        : null }
+
+      /**
        * 详情页六分区（路线图硬约束：每区空态都必须有一句话，不许空白）。
        * 徽标只认 confidence==='inferred'；未确认清单由后端算好（unconfirmed），前端不重算。
        */
@@ -1120,13 +1224,20 @@ const API_STATE = 'api/project/state'
         const badge = (conf) => (conf === 'inferred'
           ? h('span', { style: Object.assign({}, C.tag, { color: '#b06000' }), 'data-badge': 'inferred' }, '未确认')
           : null)
-        const line = (k, v) => h('div', { style: C.projMeta }, k + '：' + (v || '—'))
+        /**
+         * 0.16.0 可视化原语（纯前端，无图表库）：
+         *  - statCard：三段式统计卡（label / value / sub），数字等宽
+         *  - donut：SVG 环形图。半径 15.9155 → 周长≈100，百分比直接当 stroke-dasharray，
+         *    这是第三方插件验证过的手法，不用任何图表库；每段一个 circle，中心叠加总量。
+         *  - bulletRow：横条排行榜，条宽=值/max，颜色只作补充，文字给数值。
+         */
         /**
          * 0.15.0 任务区：用户视角是「这个项目由哪些事组成、做到哪了」，
          * 所以先给进度，再给清单；每条默认收起，点开才看目标/下一步/主会话。
          * 状态一律说人话：在做 / 做完待验 / 已完成（不摆 lifecycle·acceptance 这种内部字段）。
          * 只读——任务的写入口还没有，别在这里放假按钮。
          */
+        const line = (k, v) => h('div', { style: C.projMeta }, k + '：' + (v || '—'))
         const taskWord = (t) => (t.lifecycle !== 'active' ? '已完成'
           : t.acceptance === 'implemented_unverified' ? '做完待验' : '在做')
         const taskTone = (t) => (t.lifecycle !== 'active' ? C.taskDone
@@ -1151,6 +1262,10 @@ const API_STATE = 'api/project/state'
         const taskDoing = tasksAll.filter((t) => t.lifecycle === 'active')
         const taskDone = tasksAll.filter((t) => t.lifecycle !== 'active')
         // 先列在做的，已完成的沉到底部——用户打开详情最想知道"还有什么没做完"。
+        // 0.16.0 环图专用：真正在做 = active 且不是 implemented_unverified（后者单列「做完待验」）。
+        // 不这么分会重复计数：implemented_unverified 同时落进 taskDoing 与「做完待验」。
+        const doingOnly = tasksAll.filter((t) => t.lifecycle === 'active' && t.acceptance !== 'implemented_unverified').length
+        const verifyOnly = tasksAll.filter((t) => t.lifecycle === 'active' && t.acceptance === 'implemented_unverified').length
         const tasks = taskDoing.concat(taskDone).map(taskRow)
         /**
          * 进度行必须把「两种归属」分开说清：
@@ -1161,7 +1276,7 @@ const API_STATE = 'api/project/state'
         const taskPinned = tasksAll.length - taskFollow
         const taskHead = tasksAll.length
           ? h('div', { style: C.projMeta, 'data-task-progress': '1' },
-              '共 ' + tasksAll.length + ' 个任务 · 在做 ' + taskDoing.length + ' · 已完成 ' + taskDone.length
+              '共 ' + tasksAll.length + ' 个任务 · 在做 ' + doingOnly + ' · 已完成 ' + taskDone.length + (verifyOnly ? ' · 做完待验 ' + verifyOnly : '')
               + (taskPinned
                   ? ' · 其中 ' + taskPinned + ' 个是「人工确认」（解绑会话也不会走）'
                     + (taskFollow ? '，' + taskFollow + ' 个跟随会话' : '')
@@ -1361,6 +1476,17 @@ const API_STATE = 'api/project/state'
                 h('button', { type: 'button', style: C.pickBtn, 'data-action': 'confirm-unlink', onClick: () => submitUnlink(unlinkAsk) }, '确认解除'),
                 h('button', { type: 'button', style: C.pickBtn, onClick: () => setUnlinkAsk(null) }, '取消'))
             : null,
+          // 0.16.0：顶部 KPI 卡（对齐第三方插件的三段式统计卡），用真实 counts，不编造。
+          // 放在 detailFull 里，作为网格全宽项；不改任何 sec 编号/标题。
+          h('div', { style: C.detailFull, 'data-viz-kpis': '1' },
+            h('div', { style: C.statGrid },
+              statCard('关联会话', dd.counts && dd.counts.sessions, '个人与项目的人事连接'),
+              statCard('工作区', dd.counts && dd.counts.workspaces, '本地目录绑定'),
+              statCard('任务', dd.counts && dd.counts.tasks,
+                (dd.counts && dd.counts.tasks_stale) ? (dd.counts.tasks_stale + ' 条依据失效') : '跟随会话动态归属'),
+              statCard('交付物', allDeliverables.length, (dd.counts && dd.counts.unconfirmed) || 0 ? ((dd.counts.unconfirmed) + ' 项待确认') : '按产出类型分组'),
+              statCard('变更记录', (dd.logs || []).length, '最近活动'),
+              statCard('状态', (p.status || '—'), (dd.degraded ? '只读' : '可写')))),
           sec('project', '1 · 项目', 1, h('div', null,
             line('目标', p.objective),
             line('下一步', p.next_action),
@@ -1385,12 +1511,30 @@ const API_STATE = 'api/project/state'
           sec('tasks', '4 · 任务进度', tasks.length,
             h('div', null,
               taskHead,
+              // 0.16.0 任务状态环形图：纯 SVG，周长=100，百分比直接当 dasharray（第三方插件验证手法）
+              tasksAll.length ? h('div', { style: Object.assign({}, C.vizRow, { margin: '8px 0' }), 'data-viz-task-donut': '1' },
+                donut([
+                  { label: '在做', value: doingOnly, color: '#4176e6' },
+                  { label: '做完待验', value: verifyOnly, color: '#b06000' },
+                  { label: '已完成', value: taskDone.length, color: '#1e8e3e' },
+                ], tasksAll.length, '任务'),
+                legend([
+                  { label: '在做', value: doingOnly, color: '#4176e6' },
+                  { label: '做完待验', value: verifyOnly, color: '#b06000' },
+                  { label: '已完成', value: taskDone.length, color: '#1e8e3e' },
+                ])) : null,
               tasksAll.length ? null : h('div', { style: C.projMeta }, '还没有任务。把会话挂到本项目，那个会话负责的任务会自动出现在这里。'),
               tasks),
             '还没有任务。把会话挂到本项目，它负责的任务会自动出现在这里。'),
           sec('deliverables', '5 · 交付物', allDeliverables.length,
             h('div', null,
               dlGroups.length ? h('div', { style: C.projMeta, 'data-dl-summary': '1' }, '共 ' + allDeliverables.length + ' 条 · ' + dlSummary) : null,
+              // 0.16.0 横条榜：只有多类型时才有对比价值；单类型满格 100% 是噪音，改文字说明。
+              // 首色避开红色（红色留给错误），从黄金角偏移 30° 起。
+              dlGroups.length > 1 ? h('div', { style: { margin: '8px 0 4px' }, 'data-viz-dl-bars': '1' },
+                dlGroups.map((g, i) => bulletRow(g.type, g.items.length, allDeliverables.length, 'hsl(' + Math.round((i * 137.508 + 30) % 360) + ' 58% 52%)')))
+                : (dlGroups.length === 1 ? h('div', { style: C.projMeta, 'data-viz-dl-single': '1' },
+                    '全部交付物都是「' + dlGroups[0].type + '」（' + dlGroups[0].items.length + ' 条），无需分类对比') : null),
               deliverables,
               dlDone ? h('div', { style: C.done, 'data-dl-done': '1' }, dlDone) : null,
               dlErr ? h('div', { style: C.err, 'data-dl-error': '1' }, '交付物操作失败：' + dlErr) : null,
@@ -1444,6 +1588,7 @@ const API_STATE = 'api/project/state'
         status,
         projectList,
         basisOverlay,
+        renderModal(),
         linkPicker,
         wsPicker,
         createForm,
