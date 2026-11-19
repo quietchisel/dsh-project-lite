@@ -162,29 +162,37 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
    * 指纹用动作参数的 canonical JSON 算 sha256：参数改了就说明是另一个意图，必须拒，
    * 不许拿同一个 requestId 覆盖上一次的结果。
    */
+  // 审计 A：把「查 → 执行 → 记录」整体串行化。原实现查在锁外、记录在业务写之后，
+  // 10 个并发同 requestId 会全部通过首次查询、各自建一条业务事实（实测 10 项目 + 10 changelog）。
+  // runExclusive 用与 domain.lock 不同的键，避免与 withOp 内 journal.acquire 自锁。
   async function claimRequest(requestId, actionKey, exec) {
+    const claim = async () => {
+      const id = String(requestId)
+      if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) {
+        throw new StoreError('INVALID_INPUT', 'requestId 只允许 4-64 位字母数字与 _-')
+      }
+      const fp = createHash('sha256').update(String(actionKey)).digest('hex').slice(0, 32)
+      const cur = meta()
+      const list = Array.isArray(cur.recent_requests) ? cur.recent_requests : []
+      const hit = list.find((r) => r && r.id === id)
+      if (hit) {
+        if (hit.fp !== fp) {
+          throw new StoreError('REQUEST_ID_CONFLICT', 'requestId ' + id + ' 已用于另一个动作（指纹不同），拒绝复用', { request_id: id })
+        }
+        return { replayed: true, value: hit.value ?? null }
+      }
+      const value = await exec()
+      const plain = JSON.parse(JSON.stringify(value ?? null))
+      const next = [...list.filter((r) => r && r.id !== id), { id, fp, at: nowIso(), value: plain }].slice(-256)
+      await patchMeta((m) => ({ ...m, recent_requests: next }))
+      return { replayed: false, value }
+    }
     if (requestId === undefined || requestId === null || requestId === '') {
       return { replayed: false, value: await exec() }
     }
-    const id = String(requestId)
-    if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) {
-      throw new StoreError('INVALID_INPUT', 'requestId 只允许 4-64 位字母数字与 _-')
-    }
-    const fp = createHash('sha256').update(String(actionKey)).digest('hex').slice(0, 32)
-    const cur = meta()
-    const list = Array.isArray(cur.recent_requests) ? cur.recent_requests : []
-    const hit = list.find((r) => r && r.id === id)
-    if (hit) {
-      if (hit.fp !== fp) {
-        throw new StoreError('REQUEST_ID_CONFLICT', 'requestId ' + id + ' 已用于另一个动作（指纹不同），拒绝复用', { request_id: id })
-      }
-      return { replayed: true, value: hit.value ?? null }
-    }
-    const value = await exec()
-    const plain = JSON.parse(JSON.stringify(value ?? null))
-    const next = [...list.filter((r) => r && r.id !== id), { id, fp, at: nowIso(), value: plain }].slice(-256)
-    await patchMeta((m) => ({ ...m, recent_requests: next }))
-    return { replayed: false, value }
+    // journal 关闭时没有进程锁可用，退回原语义（仍顺序安全）。
+    if (!journal || typeof journal.runExclusive !== 'function') return claim()
+    return journal.runExclusive(claim)
   }
 
   /**

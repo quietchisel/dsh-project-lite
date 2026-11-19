@@ -17,7 +17,8 @@
  *
  * 刻意不做：恢复功能、UI 第三个 slot、任何删除/归档接口（archive 走 store 直调，不开路由）。
  */
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, stat, rename } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { openStore } from './core/store.mjs'
@@ -116,12 +117,38 @@ export function apply(ctx, config = {}) {
   // 1.4：会话注册表与项目域同根（都读 <home>/storages），不另配一个路径。
   const registry = createSessionRegistry({ root })
 
+  // 审计 E：证据日志容量上限 + 少量轮转 + session_id 脱敏。
+  // 不引第三方日志框架：超 MAX_BYTES 时 evidence.jsonl → .1 → .2（最多 2 个历史），再写新的。
+  // 进程内用 promise 链串行化，避免并发请求同时触发轮转；写失败绝不影响主功能。
+  const EV_MAX_BYTES = Number(process.env.DSH_EV_MAX_BYTES || 1048576) // 1MB
+  const EV_KEEP = 2
+  let evQueue = Promise.resolve()
+  const maskSid = (v) => {
+    if (typeof v !== 'string' || v.length <= 12) return v
+    return v.slice(0, 12) + '…' + createHash('sha256').update(v).digest('hex').slice(0, 8)
+  }
   async function evidence(obj) {
     if (!evidencePath) return
-    try {
-      await mkdir(join(evidencePath, '..'), { recursive: true })
-      await appendFile(evidencePath, JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...obj }) + '\n', 'utf8')
-    } catch { /* 证据写不进去不能影响主功能 */ }
+    const rec = { at: new Date().toISOString(), pid: process.pid, ...obj }
+    // 脱敏：会话 id/hash 化，避免正文与完整 id 落盘。
+    if (rec.session_id) rec.session_id = maskSid(rec.session_id)
+    if (rec.session) rec.session = maskSid(rec.session)
+    if (rec.error && typeof rec.error === 'string' && rec.error.length > 300) rec.error = rec.error.slice(0, 300) + '…'
+    evQueue = evQueue.then(async () => {
+      try {
+        await mkdir(join(evidencePath, '..'), { recursive: true })
+        let size = 0
+        try { size = (await stat(evidencePath)).size } catch {}
+        if (size > EV_MAX_BYTES) {
+          // 轮转：删最老的 .2，.1→.2，当前→.1
+          for (let i = EV_KEEP; i >= 1; i--) {
+            try { await rename(i === 1 ? evidencePath : evidencePath + '.' + (i - 1), evidencePath + '.' + i) } catch {}
+          }
+        }
+        await appendFile(evidencePath, JSON.stringify(rec) + '\n', 'utf8')
+      } catch { /* 证据写不进去不能影响主功能 */ }
+    }).catch(() => {})
+    return evQueue
   }
 
   let store = null

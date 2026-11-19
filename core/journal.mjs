@@ -178,23 +178,52 @@ export function createJournal({ root, unitName = 'project', staleMs, lockTimeout
     })
   }
 
-  /** 显式接管过期锁：必须传 authorized + reason，写审计。绝不自动接管。 */
-  function recoverStaleLock({ authorized, reason, actor } = {}) {
+  /**
+   * 显式接管过期锁：必须传 authorized + reason，写审计。绝不自动接管。
+   * 审计 B：接管前强制复核新鲜度——活跃锁（心跳未超时）不许接管，避免误抢。
+   * 元数据损坏单独分支（corrupt 视为可接管，但审计标 kind）。
+   * rename 加 try/catch：两个接管者并发时第二个拿到 ENOENT，返回受控结果而非未捕获异常。
+   */
+  function recoverStaleLock({ authorized, reason, actor, force } = {}) {
     if (authorized !== true) throw new JournalError('LOCK_TAKEOVER_UNAUTHORIZED', '接管过期锁必须显式 authorized:true 并说明 reason')
     if (!reason || !String(reason).trim()) throw new JournalError('LOCK_TAKEOVER_UNAUTHORIZED', '接管过期锁必须提供 reason');
     ensureDirs()
     const h = holderInfo()
     if (!existsSync(lockPath)) return { takenOver: false, reason: 'no-lock' }
+    // 活跃锁拒绝接管。判据：元数据可读 + 持锁进程仍存活(pidAlive) + 心跳未超时 + 同主机。
+    // 只要任一失活信号成立（进程已死 / 跨主机 / 心跳超时 / 元数据损坏）就允许显式接管。
+    // 注意 isStale() 只看心跳年龄，崩溃后 PID 已死但心跳未必超时——必须叠加 pidAlive。
+    const definitelyDead = h && h.pidAlive === false
+    const crossHost = h && h.host && h.host !== hostname()
+    if (h && !h.corrupt && !isStale() && !definitelyDead && !crossHost && force !== true) {
+      throw new JournalError('LOCK_ACTIVE', '锁仍活跃（持锁进程存活且心跳未超时），拒绝接管', { holder: h, stale_ms: staleMs })
+    }
+    const kind = h && h.corrupt ? 'corrupt' : (definitelyDead || crossHost ? 'dead-holder' : 'stale')
     const archived = lockPath + '.stale.' + Date.now()
-    renameSync(lockPath, archived)
-    const line = JSON.stringify({ at: new Date().toISOString(), action: 'stale-lock-takeover', actor: actor ?? null, reason, holder: h, archived }) + '\n'
+    try {
+      renameSync(lockPath, archived)
+    } catch (e) {
+      if (e.code === 'ENOENT') return { takenOver: false, reason: 'race-lost', holder: h }
+      throw e
+    }
+    const line = JSON.stringify({ at: new Date().toISOString(), action: 'stale-lock-takeover', kind, actor: actor ?? null, reason, holder: h, archived, force: force === true }) + '\n'
     try { writeFileSync(auditPath, line, { flag: 'a' }) } catch {}
-    return { takenOver: true, archived, holder: h }
+    return { takenOver: true, archived, holder: h, kind }
   }
 
   function listJournals() {
     if (!existsSync(opsDir)) return []
     return readdirSync(opsDir).filter((n) => n.endsWith('.json')).map((n) => readJson(join(opsDir, n))).filter(Boolean)
+  }
+
+  /**
+   * 审计 A：把「查幂等账 → 执行 → 记结果」包进进程内互斥。
+   * 用 unitDir 派生的**独立锁 key**（与 acquire 的 domain.lock 不同），
+   * 避免 claimRequest 持锁时业务写再 acquire 同键造成自锁。
+   * 同一进程内跨 Store 实例共享队列 → 并发同 requestId 串行化。
+   */
+  function runExclusive(fn) {
+    return inProcessLock(unitDir + '::claim', fn)
   }
 
   function readJournalByCrid(crid) {
@@ -382,7 +411,7 @@ export function createJournal({ root, unitName = 'project', staleMs, lockTimeout
 
   return {
     dir, opsDir, lockPath, unitDir, planRollback, rollbackOp, findJournal,
-    ensureDirs, acquire, recoverStaleLock, holderInfo, isStale, begin, planRollback, rollbackOp, findJournal,
+    ensureDirs, acquire, recoverStaleLock, holderInfo, isStale, begin, planRollback, rollbackOp, findJournal, runExclusive,
     listJournals, readJournalByCrid, pendingIndex, recoverAll, recoverOne, writeJsonAtomic, readJson, opPath,
     STATES,
   }

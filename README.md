@@ -158,9 +158,12 @@ test/               回归（见下节）
 
 ```bash
 npm run check      # 两个入口的语法门禁
-npm test           # 界面层 83 条（s13 28 + s15 22 + s19 33）——零依赖，任何机器可跑
-npm run test:core  # core 层 254 条（16 套，含 s26 Agent、s27 解绑/回收站、s28 工作区、s29 标题、s30 交付物）——需要 DSH 提供 @deepseek-ai/*
-npm run test:all   # 全部 337 条（19 套）
+npm test           # 界面层 3 套 / 84 条——零依赖，任何机器可跑
+npm run test:core  # core 层 21 套 / 348 条——需要 DSH 提供 @deepseek-ai/*
+npm run test:all   # 全部 24 套 / 432 条
+
+> **测试数字与套件清单的唯一权威见 [TEST-SUITES.md](TEST-SUITES.md)**。
+> 全量运行器（含 s1a/s1b 等额外 3 套）为 27 套 / 555 条，27/27 全绿。
 ```
 
 **为什么拆成两档**：`core/spec.mjs` 静态 import 了 `@deepseek-ai/dsh-storage-domain` 与 `zod`，这两个包由 DSH 运行时提供、不在公共 npm 上。所以：

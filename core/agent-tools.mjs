@@ -145,7 +145,12 @@ export function registerAgentTools(ctx, deps) {
       if (!sid) return { ok: false, error: 'SESSION_ID_REQUIRED' }
       const basis = String(args.basis ?? '').trim()
       if (!basis) return { ok: false, error: 'BASIS_REQUIRED', message: 'basis 必填：写清为什么挂到这里' }
-      const role = args.role === 'supporting' ? 'supporting' : 'primary'
+      // 严格角色白名单：非法值不许静默升级成 primary（否则非法调用能拿到权威主会话归属）。
+      const roleRaw = args.role === undefined || args.role === null || args.role === '' ? 'primary' : args.role
+      if (roleRaw !== 'primary' && roleRaw !== 'supporting') {
+        return { ok: false, error: 'INVALID_ROLE', message: 'role 只允许 primary / supporting，收到：' + String(roleRaw).slice(0, 40) }
+      }
+      const role = roleRaw
       if (role === 'supporting' && basis.length < 6) return { ok: false, error: 'SUPPORTING_NEEDS_REASON', message: 'supporting 角色的 basis 要写明理由' }
       const s = await getStore()
       if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
@@ -166,7 +171,7 @@ export function registerAgentTools(ctx, deps) {
     name: 'project_create',
     description: '建一个项目（唯一写工具之二）。只有使用者明确说「建个项目」才可调；next_action 必须是使用者确认过的动作，不能自己编。',
     parameters: {
-      name: { type: 'string', description: '项目名（≤20 字）' },
+      name: { type: 'string', description: '项目名（≤40 字）' },
       objective: { type: 'string', description: '一句话目标：为什么存在' },
       next_action: { type: 'string', description: '必填：使用者确认过的、可执行的下一步' },
       done_when: { type: 'string', description: '可选：完成条件' },

@@ -79,6 +79,15 @@ push('T12', l3.ok === false && l3.error === 'BASIS_REQUIRED', 'link 缺 basis �
 const l4 = await link.execute({ project_id: pid, role: 'supporting', basis: '短' }, exec)
 push('T13', l4.ok === false && l4.error === 'SUPPORTING_NEEDS_REASON', 'supporting 理由过短被拒')
 
+// 审计 C：非法 role 必须被拒，不能静默升级成 primary（否则非法调用拿到权威归属）。
+const SID3 = 'session-33445566-7788-99aa-bbcc-ddeeff001122'
+const badRole = await link.execute({ project_id: pid, session_id: SID3, role: 'admin', basis: '越权测试非法角色' }, exec)
+push('T18', badRole.ok === false && badRole.error === 'INVALID_ROLE', '非法 role=admin 被拒（不再静默变 primary）')
+const badRole2 = await link.execute({ project_id: pid, session_id: SID3, role: 'PRIMARY', basis: '越权测试大小写' }, exec)
+push('T19', badRole2.ok === false && badRole2.error === 'INVALID_ROLE', '非法 role=PRIMARY（大小写不符）被拒')
+const lsBad = await links.execute({ session_id: SID3 })
+push('T20', lsBad.ok === true && lsBad.total === 0, '被拒的非法 role 没有产生任何会话归属')
+
 // links_of_session 查回
 const ls1 = await links.execute({}, exec)
 push('T14', ls1.ok === true && ls1.total === 1 && ls1.links[0].project.id === pid, 'links_of_session 缺省 session_id 用当前会话，查到一条')
