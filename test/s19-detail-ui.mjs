@@ -124,11 +124,11 @@ await flush()
 tree = render()
 let flat = flatten(tree)
 
-// toggle 语义后：再点同一个项目 = 收起。所以切换 detailMode 前必须显式收起，再重新打开。
+// 0.16.1：详情只走弹窗。切换 detailMode 前先点「关闭 (Esc)」关弹窗，再点标题重开。
 const reopenDetail = async (mode) => {
   tree = render()
-  if (findAll(tree, (n) => n.props && n.props['data-detail'] === '1').length) {
-    byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
+  if (byAttr(tree, 'data-action', 'close-modal').length) {
+    byAttr(tree, 'data-action', 'close-modal')[0].props.onClick()
     await flush()
   }
   detailMode = mode
@@ -161,17 +161,18 @@ push('T32', sessRows.length === 1 && JSON.stringify(sessRows[0]).includes('DSH�
 push('T33', !src.includes("l.title || l.workspace_title ||") && src.includes("l.title || ('会话 ' + l.session_id.slice(7, 15))"),
   '详情会话标题读不到时回落会话短id，不用工作区名冒充')
 
-// --- toggle：再点同一个项目标题 → 收起；第三次点 → 重新展开 ---
+// --- 0.16.1：标题打开的是对话框浮层，不是行内展开；关闭按钮可用、可重开 ---
+const mo = findAll(tree, (n) => n.props && n.props['data-modal-overlay'] === '1')[0]
+push('T27', !!mo && mo.props.role === 'dialog' && mo.props['aria-modal'] === 'true', '点标题打开对话框浮层（role=dialog + aria-modal=true）')
+push('T30', !!mo && findAll(mo, (n) => n.props && n.props['data-detail'] === '1').length > 0 && !findAll(tree, (n) => n.props && n.props['data-detail-slot'] === 'prj_A').length, '详情只在弹窗里，列表行下方不再内嵌（无 data-detail-slot）')
+byAttr(tree, 'data-action', 'close-modal')[0].props.onClick()
+await flush()
+tree = render(); flat = flatten(tree)
+push('T28', !findAll(tree, (n) => n.props && n.props['data-modal-overlay'] === '1').length, '点「关闭 (Esc)」弹窗消失，主面板保留')
 byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
 await flush()
 tree = render(); flat = flatten(tree)
-push('T27', !flat.attrs['data-detail'], '再点当前已展开的项目标题 → 详情收起')
-byAttr(tree, 'data-action', 'open-detail')[0].props.onClick()
-await flush()
-tree = render(); flat = flatten(tree)
-push('T28', flat.attrs['data-detail-state'] === 'ready', '第三次点 → 重新展开（toggle 双向可用）')
-const slot = findAll(tree, (n) => n.props && n.props['data-detail-slot'] === 'prj_A')[0]
-push('T30', !!slot && findAll(slot, (n) => n.props && n.props['data-detail'] === '1').length > 0, '详情内嵌在被点项目行下方（data-detail-slot），标题与详情不分离')
+push('T34', flatten(tree).attrs['data-detail-state'] === 'ready', '关掉后再点标题能重新打开详情')
 
 await reopenDetail('missing')
 flat = flatten(tree)

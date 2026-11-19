@@ -482,6 +482,17 @@ const API_STATE = 'api/project/state'
         }
       }, [])
 
+      /** 0.16.1：点项目标题直接开详情弹窗——先占位 modal，再异步把数据加载进 detail。 */
+      const openModal = useCallback((p) => {
+        setModalFor(p)
+        return openDetail(p)
+      }, [openDetail])
+      /** 关弹窗时一并清掉 detail，避免下次打开闪上一项目的数据。 */
+      const closeModal = useCallback(() => {
+        setModalFor(null)
+        setDetail(null)
+      }, [])
+
       /** 归档：先本地确认，再 POST；成功后立刻刷新详情与列表。 */
       const submitArchive = useCallback(async (ask) => {
         if (!ask) return
@@ -888,9 +899,8 @@ const API_STATE = 'api/project/state'
                   style: { background: 'transparent', border: 'none', padding: 0, font: 'inherit', fontWeight: 600, color: 'inherit', cursor: 'pointer', textAlign: 'left' },
                   'data-action': 'open-detail',
                   'data-for': p.id,
-                  // toggle：当前详情就是它 → 收起（2026-11-16 使用者反馈：再点一次要能收起）。
-                  // 点别的项目仍走 openDetail（同一时刻只展开一个）。
-                  onClick: () => { if (detail && detail.id === p.id) setDetail(null); else openDetail(p) },
+                  // 0.16.1：点标题直接开详情弹窗，不再在列表行下方内嵌展开。
+                  onClick: () => openModal(p),
                 }, p.name || '(未命名)'),
                 p.confidence === 'inferred'
                   ? h('span', {
@@ -913,17 +923,7 @@ const API_STATE = 'api/project/state'
                     onClick: () => openLink(p),
                   }, '关联会话')
                 : null,
-                 // 0.16.0 弹窗详情入口（与内嵌详情共存，不动 s19 的内嵌断言）。
-                 h('button', {
-                   type: 'button', style: C.pickBtn, 'data-action': 'open-modal', 'data-for': p.id,
-                   'aria-label': '弹窗查看 ' + (p.name || p.id),
-                   onClick: () => setModalFor(p),
-                 }, '弹窗详情'),
                )))
-            // v0.10.2：详情内嵌到被点项目行正下方，项目多时标题与详情不分离。
-            if (detail && detail.id === p.id) {
-              rows.push(h('div', { key: 'detail-' + p.id, 'data-detail-slot': p.id, style: { margin: '4px 0 8px' } }, renderDetail()))
-            }
           }
         }
         // 0.16.0 全局 KPI 卡（对标「上下文洞察」顶部统计行）：数字全来自 overview.counts，不编造。
@@ -1179,24 +1179,28 @@ const API_STATE = 'api/project/state'
       ) : null
 
       /**
-       * 0.16.0 项目详情弹窗：与内嵌详情共存。
-       * 复用 renderDetail()、C.overlayMask；点击卡片上的「弹窗详情」打开。
+       * 0.16.1：项目详情只走弹窗——点标题即打开，不再在列表行下方内嵌展开。
+       * 复用 renderDetail()（六分区 + 可视化都在里面）、C.overlayMask。
+       * detail 未加载或属于别的项目时先显示「读取详情中…」，绝不串项目。
        * Esc 关闭：mask 自身 tabIndex=0 + onKeyDown，不引入 useEffect（测试 harness 不执行 effect 清理）。
        */
       function renderModal() { return modalFor ? h('div', {
         style: C.overlayMask, 'data-modal-overlay': '1', role: 'dialog', 'aria-modal': 'true',
         'aria-label': '项目详情：' + (modalFor.name || modalFor.id),
         tabIndex: 0,
-        onKeyDown: (e) => { if (e.key === 'Escape') setModalFor(null) },
-        onClick: (e) => { if (e.target === e.currentTarget) setModalFor(null) },
+        onKeyDown: (e) => { if (e.key === 'Escape') closeModal() },
+        onClick: (e) => { if (e.target === e.currentTarget) closeModal() },
       },
         h('div', { style: C.modalBox, onClick: (e) => e.stopPropagation() },
           h('div', { style: C.modalHead },
             h('div', { style: C.formTitle }, '详情：' + (modalFor.name || modalFor.id)),
             h('button', { type: 'button', style: C.btn, 'data-action': 'close-modal', autoFocus: true,
-              onKeyDown: (e) => { if (e.key === 'Escape') setModalFor(null) },
-              onClick: () => setModalFor(null) }, '关闭 (Esc)')),
-          h('div', { style: C.modalBody }, renderDetail())))
+              onKeyDown: (e) => { if (e.key === 'Escape') closeModal() },
+              onClick: closeModal }, '关闭 (Esc)')),
+          h('div', { style: C.modalBody },
+            detail && detail.id !== modalFor.id
+              ? h('div', { style: C.empty }, '读取详情中…')
+              : renderDetail())))
         : null }
 
       /**
@@ -1218,7 +1222,7 @@ const API_STATE = 'api/project/state'
         if (dd.found === false) {
           return h('div', { style: wrapStyle, 'data-detail': '1', 'data-detail-state': 'missing' },
             h('div', { style: C.empty }, '这个项目已经不在了（可能被归档或删除）。'),
-            h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起'))
+            h('button', { type: 'button', style: C.btn, onClick: closeModal }, '关闭'))
         }
         const p = dd.project || {}
         const badge = (conf) => (conf === 'inferred'
@@ -1428,7 +1432,7 @@ const API_STATE = 'api/project/state'
           count === 0 ? h('div', null, h('div', { style: C.empty }, emptyText), alwaysBody ? body : null) : body)
         return h('div', { style: C.detail, 'data-detail': '1', 'data-detail-state': 'ready', 'data-detail-id': p.id },
           h('div', { style: Object.assign({}, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }, C.detailFull) },
-            h('div', { style: C.formTitle }, '详情：' + (p.name || p.id) + ' · rev ' + p.rev),
+            h('div', { style: C.formTitle }, '版本 rev ' + p.rev),
             h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
               (p.status === 'active' || p.status === 'paused' || p.status === 'done')
                 ? h('button', {
@@ -1577,8 +1581,6 @@ const API_STATE = 'api/project/state'
             : null,
           sec('logs', '6 · 变更记录（最多显示 10 条）', logs.length, logs, '还没有变更记录。'),
           sec('basis', '7 · 系统推断的归属', unconfRows.length, unconf, '所有关系都是确认过的，没有推断项。'),
-          h('div', { style: C.detailFull },
-            h('button', { type: 'button', style: C.btn, onClick: () => setDetail(null) }, '收起详情')),
         )
       })() : null }
 
