@@ -109,7 +109,7 @@ export function registerAgentTools(ctx, deps) {
   // ---- Continuity 0.1 只读：项目上下文恢复（高信号摘要，与 project_get 全量详情区分）----
   reg({
     name: 'project_resume',
-    description: '恢复一个长期项目的工作上下文（只读）。返回高信号摘要：目标/完成判据/下一步(含过期提示)/最新已确认检查点/待确认数/未决信号/会话与最终交付物引用/可信度汇总。与 project_get 的区别：resume 是小摘要，用于新会话快速接续；project_get 是全量详情。不传 project_id 时按当前会话的有效关联解析，绝不猜项目。不用于查看全量变更历史或交付物正文。',
+    description: '恢复一个长期项目的工作上下文（只读）。返回高信号摘要：目标/完成判据/下一步(含过期提示)/最新已确认检查点/待确认数/未决信号/会话与最终交付物引用/可信度汇总。与 project_get 的区别：resume 是小摘要，用于新会话快速接续；project_get 是全量详情。不传 project_id 时先按当前会话的有效 primary 关联解析，再按当前会话所属工作区的项目关联解析；多候选/歧义/注册表不可用会明确返回，绝不猜项目。身份只来自宿主会话，不接受参数冒充。不用于查看全量变更历史或交付物正文。',
     parameters: {
       project_id: { type: 'string', description: '可选：项目 id（prj_…）。不传则按当前会话关联解析' },
     },
@@ -120,17 +120,51 @@ export function registerAgentTools(ctx, deps) {
       await s.refresh()
       const sid = callerSid(exec)
       let pid = args && args.project_id ? String(args.project_id) : null
-      // A2 项目解析规则
+      let resolvedVia = pid ? 'explicit' : null
+      // A2 项目解析：显式 id > 唯一 active primary > 当前会话工作区→项目（0.18）
+      // 身份 sid 只来自宿主 exec；模型传的 workspace_id / session_id 一律不读，防冒充。
       if (!pid) {
-        if (!sid) return { ok: true, found: false, state: 'no_identity', message: '未提供 project_id，且当前调用不在会话里，无法解析项目', candidates: [] }
-        const links = (typeof s.links === 'function' ? s.links() : []).filter((l) => l && l.session_id === sid && l.unlinked !== true && l.role === 'primary')
+        if (!sid) return { ok: true, found: false, state: 'no_identity', resolved_via: null, message: '未提供 project_id，且当前调用不在会话里，无法解析项目', candidates: [] }
         const projects = typeof s.projects === 'function' ? s.projects() : []
-        const active = links.map((l) => projects.find((p) => p.id === l.project_id)).filter((p) => p && p.status === 'active')
-        if (active.length === 0) return { ok: true, found: false, state: 'no_association', message: '当前会话没有有效的 active primary 项目关联', candidates: [] }
-        if (active.length > 1) {
-          return { ok: true, found: false, state: 'multiple_candidates', message: '当前会话关联多个项目，请明确指定 project_id', candidates: active.map((p) => ({ id: p.id, name: p.name, status: p.status })) }
+        const projectById = (id) => projects.find((p) => p.id === id)
+        // ① 现有唯一 primary 解析（原样保留，确保 W7 不回归）
+        const links = (typeof s.links === 'function' ? s.links() : []).filter((l) => l && l.session_id === sid && l.unlinked !== true && l.role === 'primary')
+        const active = links.map((l) => projectById(l.project_id)).filter((p) => p && p.status === 'active')
+        if (active.length === 1) {
+          pid = active[0].id; resolvedVia = 'primary'
+        } else if (active.length > 1) {
+          return { ok: true, found: false, state: 'multiple_candidates', resolved_via: 'primary', message: '当前会话关联多个项目，请明确指定 project_id', candidates: active.map((p) => ({ id: p.id, name: p.name, status: p.status })) }
+        } else {
+          // ② primary 无结果 → 当前会话所属工作区 → 项目关联（只读解析）
+          const reg = deps.registry
+          if (!reg || typeof reg.workspaceIdsOf !== 'function') {
+            return { ok: true, found: false, state: 'registry_unavailable', resolved_via: 'workspace', message: '无法解析当前会话所属工作区（注册表适配器不可用），不猜项目', candidates: [] }
+          }
+          let wr
+          try { wr = await reg.workspaceIdsOf(sid) } catch (e) { wr = { ok: false, reason: String(e && e.message ? e.message : e) } }
+          if (!wr || wr.ok !== true) {
+            return { ok: true, found: false, state: 'registry_unavailable', resolved_via: 'workspace', message: 'DSH 工作区注册表不可用，拒绝猜测项目：' + (wr && wr.reason ? wr.reason : '未知原因'), candidates: [] }
+          }
+          const wsIds = Array.isArray(wr.workspace_ids) ? wr.workspace_ids : []
+          if (wsIds.length === 0) {
+            return { ok: true, found: false, state: 'no_association', resolved_via: 'workspace', message: '当前会话不在 DSH 工作区注册表里，无法按工作区解析项目', candidates: [] }
+          }
+          if (wsIds.length > 1) {
+            return { ok: true, found: false, state: 'workspace_ambiguous', resolved_via: 'workspace', message: '当前会话同时属于多个工作区，无法唯一确定项目，请明确指定 project_id', candidates: wsIds.map((w) => ({ workspace_id: w })) }
+          }
+          const wsId = wsIds[0]
+          const wsLinks = (typeof s.workspaces === 'function' ? s.workspaces() : [])
+            .filter((w) => w && w.workspace_id === wsId && w.unlinked !== true)
+          const wsProjects = wsLinks.map((w) => projectById(w.project_id))
+            .filter((p) => p && p.status === 'active' && p.status !== 'deleted')
+          if (wsProjects.length === 0) {
+            return { ok: true, found: false, state: 'no_association', resolved_via: 'workspace', message: '当前工作区没有关联的 active 项目', candidates: [] }
+          }
+          if (wsProjects.length > 1) {
+            return { ok: true, found: false, state: 'multiple_candidates', resolved_via: 'workspace', message: '当前工作区关联多个 active 项目，请明确指定 project_id', candidates: wsProjects.map((p) => ({ id: p.id, name: p.name, status: p.status })) }
+          }
+          pid = wsProjects[0].id; resolvedVia = 'workspace'
         }
-        pid = active[0].id
       }
       // 存在性 + 状态检查（deleted 不恢复）
       const target = typeof s.project === 'function' ? s.project(pid) : null
@@ -139,7 +173,8 @@ export function registerAgentTools(ctx, deps) {
       const checkpoints = typeof s.checkpoints === 'function' ? s.checkpoints() : []
       const svc = readService(s, { titlesOf: deps.titlesOf, registry: deps.registry })
       const out = await svc.resume(pid, { checkpoints, sessionId: sid })
-      if (evidence) evidence({ phase: 'tool-project-resume', id: pid, found: out.found })
+      out.resolved_via = resolvedVia
+      if (evidence) evidence({ phase: 'tool-project-resume', id: pid, found: out.found, resolved_via: resolvedVia })
       return out
     },
   })

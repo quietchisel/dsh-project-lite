@@ -48,11 +48,17 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     const tables = doc && doc.tables ? doc.tables : {}
     const workspaces = tables.workspaces && typeof tables.workspaces === 'object' ? tables.workspaces : {}
     const byId = new Map()
+    // 0.18 工作区续接：byId 保留第一次出现（给 list/verify 用，行为不变）；
+    // sessionWorkspaces 保留**全部**归属，只给 Resume 的工作区解析判歧义用。
+    const sessionWorkspaces = new Map()
     for (const [workspaceId, rec] of Object.entries(workspaces)) {
       if (!rec || typeof rec !== 'object') continue
       const ids = Array.isArray(rec.sessionIds) ? rec.sessionIds : []
       for (const sid of ids) {
         if (typeof sid !== 'string' || sid === '') continue
+        // 0.18：记录会话出现的**每一个**工作区（不去重、不裁决），供 Resume 判歧义。
+        if (!sessionWorkspaces.has(sid)) sessionWorkspaces.set(sid, [])
+        sessionWorkspaces.get(sid).push(workspaceId)
         // 同一会话出现在两个工作区是 DSH 自己的事，这里保留第一次出现（不替它裁决）。
         if (byId.has(sid)) continue
         byId.set(sid, {
@@ -73,6 +79,7 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     }))
     return {
       byId,
+      sessionWorkspaces,
       workspaceRows,
       workspaceIds: new Set(Array.isArray(rawIds) ? rawIds : []),
       // 区分"字段缺失"（未知，不强制）与"字段是空数组"（明确没有任何工作区，必须拦）。
@@ -90,17 +97,17 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     try { mtimeMs = (await stat(workspaceFile)).mtimeMs } catch { mtimeMs = null }
     if (!force && snap && snap.mtimeMs === mtimeMs && now - snap.at < ttlMs) return snap
     if (mtimeMs === null) {
-      snap = { at: now, mtimeMs: null, ids: new Set(), byId: new Map(), workspaceRows: [], total: 0, ok: false, reason: 'workspace.json 不存在：' + workspaceFile }
+      snap = { at: now, mtimeMs: null, ids: new Set(), byId: new Map(), sessionWorkspaces: new Map(), workspaceRows: [], total: 0, ok: false, reason: 'workspace.json 不存在：' + workspaceFile }
       return snap
     }
     let parsed
     try {
       parsed = parseWorkspace(await readFile(workspaceFile, 'utf8'))
     } catch (error) {
-      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), workspaceRows: [], workspaceIds: new Set(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
+      snap = { at: now, mtimeMs, ids: new Set(), byId: new Map(), sessionWorkspaces: new Map(), workspaceRows: [], workspaceIds: new Set(), total: 0, ok: false, reason: 'workspace.json 读不出来：' + String(error && error.message ? error.message : error) }
       return snap
     }
-    snap = { at: now, mtimeMs, ids: new Set(parsed.byId.keys()), byId: parsed.byId, workspaceRows: parsed.workspaceRows, workspaceIds: parsed.workspaceIds, workspaceIdsKnown: parsed.workspaceIdsKnown, total: parsed.byId.size, ok: true, reason: null }
+    snap = { at: now, mtimeMs, ids: new Set(parsed.byId.keys()), byId: parsed.byId, sessionWorkspaces: parsed.sessionWorkspaces, workspaceRows: parsed.workspaceRows, workspaceIds: parsed.workspaceIds, workspaceIdsKnown: parsed.workspaceIdsKnown, total: parsed.byId.size, ok: true, reason: null }
     return snap
   }
 
@@ -241,11 +248,24 @@ export function createSessionRegistry({ root, ttlMs = 5000, titleConcurrency = 1
     return { ok: true, session_id: id, workspace_id: row.workspace_id, workspace_path: row.workspace_path }
   }
 
+  /**
+   * 0.18 工作区续接（只读）：某会话在 DSH workspace.json 里出现的**全部**工作区 id。
+   * 与 byId 不同：这里不做"保留第一次"的裁决，多归属原样返回，由调用方判歧义。
+   * 注册表读不到 → ok:false（明确失败，绝不静默当"无工作区"）。
+   */
+  async function workspaceIdsOf(sessionId) {
+    const s = await snapshot()
+    if (!s.ok) return { ok: false, code: 'REGISTRY_UNAVAILABLE', reason: s.reason || '读不到 DSH 会话注册表', session_id: String(sessionId || ''), workspace_ids: [] }
+    const id = String(sessionId || '')
+    const ids = (s.sessionWorkspaces && s.sessionWorkspaces.get(id)) || []
+    return { ok: true, session_id: id, workspace_ids: ids.slice() }
+  }
+
   /** 存在性：同步判定，给 reconcile 用（先 await snapshot() 再取这个闭包）。 */
   function existsFn(s) {
     const ids = s && s.ids ? s.ids : new Set()
     return (sessionId) => ids.has(String(sessionId || ''))
   }
 
-  return { snapshot, list, listWorkspaces, titleOf, titlesOf, existsFn, verify, paths: { workspaceFile, cacheDir } }
+  return { snapshot, list, listWorkspaces, titleOf, titlesOf, existsFn, verify, workspaceIdsOf, paths: { workspaceFile, cacheDir } }
 }

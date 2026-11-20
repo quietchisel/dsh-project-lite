@@ -8,6 +8,22 @@
 
 （暂无）
 
+## [0.18.0] - 2026-11-20
+
+### 新增（Resume 工作区→项目只读解析）
+
+- **project_resume 裸调增强**：不传 project_id 时，若当前会话无有效 active primary 关联，新增按「当前会话所属 DSH 工作区 → 关联项目」的只读解析路径。优先级：显式 id > 唯一 active primary > 工作区唯一 active 项目 > 多候选/歧义/无关联。身份只取宿主 exec 的会话 id，不接受模型传 workspace_id/session_id 冒充。
+- **sessions.mjs 新增只读 workspaceIdsOf(sessionId)**：从 workspace.json 返回会话出现的**全部**工作区 id（byId 仍保留第一次出现，不影响 list/verify/titlesOf）。注册表读不到明确返回 ok:false，不静默。
+- 解析结果带 resolved_via（explicit/primary/workspace），多候选返回 candidates 列表，会话多工作区返回 workspace_ambiguous，注册表不可用返回 registry_unavailable——全程不猜项目。
+
+### 未改动（审核边界）
+
+- 权威写机制零改动：authorizeWrite / identity.mjs / primary 唯一性 / manual 授权边界 / transferPrimary 均未碰。工作区解析只读，不改项目归属、不调用换主。
+
+### 测试
+
+- 新增 s39-workspace-resume（W1-W8 共 10 项断言全过）；s35 夹具补注真实 registry（R5 语义随之更真实，8/8）。全量 32 套全绿。
+
 ## [0.17.0] - 2026-11-20
 
 ### 新增（Project Continuity MVP：跨会话工作闭环）

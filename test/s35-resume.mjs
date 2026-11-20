@@ -25,6 +25,7 @@ const INST = 'D:/DSH工作区/工作区管理系统改造/_会话/20261115-S1只
 const { apply, CREATE_PATH, LINK_PATH } = await import(pathToFileURL(INST+'/index.js').href)
 const { createReadService } = await import(pathToFileURL(INST+'/core/read.mjs').href)
 const { openStore } = await import(pathToFileURL(INST+'/core/store.mjs').href)
+const { createSessionRegistry } = await import(pathToFileURL(INST+'/core/sessions.mjs').href)
 await rm(BASE,{recursive:true,force:true}); const ROOT=join(BASE,'store'); await mkdir(ROOT,{recursive:true})
 const SID='session-55555555-5555-5555-5555-555555555555', WS='ws-eeeeeeee-0000-0000-0000-000000000005'
 await writeFile(join(ROOT,'workspace.json'), JSON.stringify({unit:{name:'workspace',version:2},global:{initialized:true,defaultWorkspaceId:WS,workspaceIds:[WS],archivedSessionIds:[],pinnedSessionIds:[]},tables:{workspaces:{[WS]:{path:BASE,title:'W',sessionIds:[SID],createdAt:'2026-11-01T00:00:00.000Z',updatedAt:'2026-11-01T00:00:00.000Z'}}}}),'utf8')
@@ -40,7 +41,8 @@ apply(ctx,{root:ROOT,evidencePath:join(BASE,'ev.jsonl')})
 const { registerAgentTools } = await import(pathToFileURL(INST+'/core/agent-tools.mjs').href)
 const reg=new Map(); const toolCtx={tools:{register(spec){reg.set(spec.name,spec);return()=>{}}}}
 const s2=await openStore({root:ROOT,actor:'s35b'})
-registerAgentTools(toolCtx,{defineTool:(o)=>o,tools:toolCtx.tools,getStore:async()=>s2,readService:createReadService,evidence:()=>{}})
+const registry35 = createSessionRegistry({root:ROOT})
+registerAgentTools(toolCtx,{defineTool:(o)=>o,tools:toolCtx.tools,getStore:async()=>s2,readService:createReadService,titlesOf:registry35.titlesOf,registry:registry35,evidence:()=>{}})
 await new Promise(r=>setTimeout(r,100))
 const resumeTool=reg.get('project_resume')
 const exec={agent:{sessionId:SID}}
