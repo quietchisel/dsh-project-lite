@@ -51,6 +51,38 @@ function nextActionInvalid(nextAction) {
 const textOutput = (value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 
 /**
+ * 0.20：按会话管理规则定稿 §5 生成建议的侧栏对话标题，供使用者复制后在 DSH 界面自己改名。
+ * 格式：【角色】任务短名 · 当前工作（T-xxxx MMDD）
+ * 只算不写：不碰宿主 workspace.json / projcache，不碰任何写闸。
+ * 数据只取项目域已有事实：project.name / task.source_id / next_action / 会话关联 role。
+ */
+function suggestedSessionTitle(store, projectId, sessionId) {
+  const p = typeof store.project === 'function' ? store.project(projectId) : null
+  if (!p) return null
+  const links = (typeof store.links === 'function' ? store.links() : [])
+    .filter((l) => l && l.project_id === projectId && l.session_id === sessionId && l.unlinked !== true)
+  const isPrimary = links.some((l) => l.role === 'primary')
+  const role = isPrimary ? '主' : (links.some((l) => l.role === 'supporting') ? '执行' : '参考')
+  // 任务短名：优先该会话关联任务的 source_id 对应任务 title，否则项目名；≤8 汉字。
+  const tasks = (typeof store.tasks === 'function' ? store.tasks() : []).filter((t) => t && t.project_id === projectId)
+  const mine = tasks.find((t) => t.primary_session_id === sessionId || t.assigned_session_id === sessionId) || tasks[0]
+  const rawShort = (mine && mine.title) || p.name || '项目'
+  const short = String(rawShort).replace(/[【】·（）()]/g, '').trim().slice(0, 8)
+  // 当前工作：next_action 去态度词后取前 16 字；没有就用项目 objective 首句。
+  let cur = ''
+  const na = mine && mine.next_action ? String(mine.next_action) : (p.next_action ? String(p.next_action) : '')
+  if (na) cur = na.replace(/^(继续|推进|完成|执行|打开)/, '').trim().slice(0, 16).trim()
+  if (!cur && p.objective) cur = String(p.objective).trim().slice(0, 16).trim()
+  if (!cur) cur = '推进中'
+  // 编号：优先关联任务的 source_id（形如 T-xxxx），取不到则降级不带编号。
+  const src = mine && typeof mine.source_id === 'string' && /^T-[0-9]{4}/i.test(mine.source_id) ? mine.source_id.toUpperCase() : null
+  const d = new Date()
+  const mmdd = String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
+  const tail = src ? '（' + src + ' ' + mmdd + '）' : '（' + mmdd + '）'
+  return '【' + role + '】' + short + ' · ' + cur + ' ' + tail
+}
+
+/**
  * 注册全部工具。
  * @param ctx  Host 上下文，需有 ctx.tools.register
  * @param deps { defineTool, getStore, readService, evidence }
@@ -174,6 +206,7 @@ export function registerAgentTools(ctx, deps) {
       const svc = readService(s, { titlesOf: deps.titlesOf, registry: deps.registry })
       const out = await svc.resume(pid, { checkpoints, sessionId: sid })
       out.resolved_via = resolvedVia
+      out.suggested_session_title = sid ? suggestedSessionTitle(s, pid, sid) : null
       if (evidence) evidence({ phase: 'tool-project-resume', id: pid, found: out.found, resolved_via: resolvedVia })
       return out
     },
