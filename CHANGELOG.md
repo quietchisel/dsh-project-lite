@@ -21,7 +21,16 @@
 - **第二批 P3 会话发现**：会话候选路由改走公开 sessionQuery seam（运行时探测 ctx.get('sessionQuery')），拿不到自动回退 registry(projcache)，不把主程序能力当插件已验证事实；证据日志记 source。
 - **第二批 共享收件箱**：会话右键「查看我的待办」浮层，按 session_id 读现有任务记录列待办（标题/目标/验收/状态），读现有任务权威、不另建数据。
 - **第二批 done_when 完成候选**：read.completionCandidate 纯派生计算（无落盘），项目详情在任务侧全 accepted 且无 active/未裁定/被退回任务时显示「完成候选」提示 + done_when 原文 + 「确认完成并收敛项目」按钮；系统只提示、不自动宣布完成，最终由 primary 人工确认后调 project_update。
-- **测试**：新增 s44-reduction（13/13：白名单/CAS/权限/完成候选/receipts/inbox/primary_count）；同步 s12/s13/s14/s15 计数断言（路由 20→23、slot 6→7、POST 14→16）。全量 36+ 套全绿。
+- **测试**：新增 s44-reduction（15/15：白名单/CAS/权限/完成候选/receipts/inbox/primary_count + 2 条真机回归 T1b/T1c）；同步 s12/s13/s14/s15 计数断言（路由 20→23、slot 6→7、POST 14→16）。全量 36+ 套全绿。
+
+### 修复（真机验证暴露的两处回归）
+
+- 会话右键 basis 改回固定字面量 `'会话右键关联'`：动态拼接 basis 会让重复关联被 `linkSession` 误判为内容变化 → `EXPECTED_REV_REQUIRED`。加 s13 D5 源码断言防再犯。
+- `linkSession` 复活判定放宽：unlinked 记录从界面消失、拿不到旧 rev/basis/role，原 `sameFields && unlinked` 等于堵死复活路；改为「键存在且 unlinked 即允许复活，用本次提交值覆盖、清 unlinked、rev+1、写 changelog」。活跃记录换角色仍须 `expected_rev`（s31 R2 语义不变）。加 s44 T1c 回归。
+
+### 真机验证
+
+- 历史 unlinked 关联（rev3、role=primary）经会话右键重新加入 → 成功复活为 supporting、rev4、unlinked 清除；证据日志新进程无 link-error；共享收件箱返回待办 1 条。
 
 ### 边界
 
