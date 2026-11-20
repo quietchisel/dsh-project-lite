@@ -16,7 +16,7 @@
 
 import { resolveHostSessionId, runAsCaller } from './identity.mjs'
 
-const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint']
+const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide']
 
 /**
  * 唯一身份来源：宿主 exec。写入类工具一律包在 runAsCaller 里，
@@ -323,6 +323,131 @@ export function registerAgentTools(ctx, deps) {
       } catch (e) {
         return { ok: false, error: e && e.code ? e.code : 'CHECKPOINT_FAILED', message: String(e && e.message ? e.message : e) }
       }
+    },
+  })
+
+
+  // ---- 0.19 多分支协作：primary 派单（建任务并派给 supporting）----
+  reg({
+    name: 'task_dispatch',
+    description: '建一个任务并派单给某个 supporting 会话（受控写，只有 primary 能调）。这是多分支协作的派单入口：主对话把图片/音频/文稿等子任务派给各分支。身份来自宿主会话。只有使用者明确要求时才建任务；assigned_session_id 必须是本项目的有效 supporting/branch 会话。重复调用相同 requestId 不重复创建。',
+    parameters: {
+      project_id: { type: 'string', description: '项目 id（prj_…）' },
+      title: { type: 'string', description: '任务标题' },
+      objective: { type: 'string', description: '任务目标：这一支要产出什么' },
+      assigned_session_id: { type: 'string', description: '派给哪个会话（session-…）；省略=建 todo 任务暂时不派' },
+      acceptance_criteria: { type: 'array', description: '可选：完成判据列表' },
+      note: { type: 'string', description: '可选：备注' },
+      requestId: { type: 'string', description: '可选幂等 id' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.project_id) return { ok: false, error: 'PROJECT_ID_REQUIRED' }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份，拒绝派单' }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级' }
+      try {
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch' }, () => s.createTask({
+          project_id: args.project_id, title: args.title, objective: args.objective,
+          assigned_session_id: args.assigned_session_id, acceptance_criteria: args.acceptance_criteria,
+          note: args.note, client_request_id: args.requestId,
+        }))
+        if (r && r.task && r.task.assigned_session_id) {
+          await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch' }, () => s.assignTask({ task_id: r.task.id, assigned_session_id: r.task.assigned_session_id }))
+        }
+        if (evidence) evidence({ phase: 'tool-task-dispatch', id: r.task && r.task.id, project: args.project_id })
+        return { ok: true, task: (await s.task(r.task.id)), message: '任务已建并派单' }
+      } catch (e) { return { ok: false, error: e && e.code ? e.code : 'DISPATCH_FAILED', message: String(e && e.message ? e.message : e) } }
+    },
+  })
+
+  // ---- 0.19 只读：查任务回执 ----
+  reg({
+    name: 'task_receipts',
+    description: '查任务回执（只读）。可按 project_id 或 task_id 过滤；省略则列全部。回执是 supporting 分支交付的证据，状态 submitted/accepted/rejected，accepted 需 primary 裁定，不等于自动完成任务。',
+    parameters: {
+      project_id: { type: 'string', description: '可选：项目 id 过滤' },
+      task_id: { type: 'string', description: '可选：任务 id 过滤' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args) {
+      const s = await getStore()
+      await s.refresh()
+      let list = typeof s.receipts === 'function' ? s.receipts() : []
+      if (args && args.task_id) list = list.filter((r) => r.task_id === args.task_id)
+      if (args && args.project_id) list = list.filter((r) => r.project_id === args.project_id)
+      return { ok: true, total: list.length, receipts: list, degraded: s.degradationReport().degraded }
+    },
+  })
+
+  // ---- 0.19 受限写：supporting 提交任务回执 ----
+  reg({
+    name: 'task_receipt_submit',
+    description: '提交一份任务回执（受限写）。只有被派单的 supporting/branch 会话能提交，且只能提交派给自己的任务；身份取自宿主会话，不接受参数冒充。回执落 submitted，不自动生效、不等于任务完成——正式状态由 primary 裁定。用于分支办完图片/音频/文稿后把成果交回项目。重复 requestId 不重复提交。',
+    parameters: {
+      project_id: { type: 'string', description: '项目 id' },
+      task_id: { type: 'string', description: '派给本会话的任务 id' },
+      summary: { type: 'string', description: '执行摘要（2-500 字）' },
+      deliverables: { type: 'array', description: '可选：交付物引用列表（文件路径/链接，只索引不搬运）' },
+      result: { type: 'string', description: '结果建议：completed / blocked / needs_revision' },
+      requestId: { type: 'string', description: '可选幂等 id' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.project_id || !args.task_id) return { ok: false, error: 'PROJECT_TASK_REQUIRED' }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份，拒绝提交回执' }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级' }
+      try {
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:receipt-submit' }, () => s.submitTaskReceipt({
+          project_id: args.project_id, task_id: args.task_id,
+          source_session_id: hostSid, source_session_role: 'supporting',
+          summary: args.summary, deliverables: args.deliverables, result: args.result || 'completed',
+          client_request_id: args.requestId,
+        }))
+        if (evidence) evidence({ phase: 'tool-receipt-submit', id: r.receipt.id, task: args.task_id })
+        return { ok: true, receipt: r.receipt, message: '回执已提交（submitted），待 primary 裁定；不自动完成任务' }
+      } catch (e) { return { ok: false, error: e && e.code ? e.code : 'RECEIPT_SUBMIT_FAILED', message: String(e && e.message ? e.message : e) } }
+    },
+  })
+
+  // ---- 0.19 权威写：primary 裁定回执 ----
+  reg({
+    name: 'task_receipt_decide',
+    description: '裁定一份任务回执（受控写，只有 primary 能调）：accepted 或 rejected。这是正式任务状态的唯一入口——分支提交回执后任务停在"做完待验"，只有这里确认后才 accepted、任务才 closed。裁定前请核对回执内容与交付物；裁定后回执不可再改。不要用于自我审批。',
+    parameters: {
+      receipt_id: { type: 'string', description: '回执 id（rcp_…）' },
+      decision: { type: 'string', description: 'accepted 或 rejected' },
+      note: { type: 'string', description: '可选：裁定理由' },
+      expected_rev: { type: 'number', description: '可选：乐观并发 rev' },
+      requestId: { type: 'string', description: '可选幂等 id' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.receipt_id || !args.decision) return { ok: false, error: 'RECEIPT_DECISION_REQUIRED' }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份' }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级' }
+      try {
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:receipt-decide' }, () => s.decideTaskReceipt({
+          id: args.receipt_id, decision: args.decision, note: args.note,
+          expected_rev: args.expected_rev, client_request_id: args.requestId,
+        }))
+        if (evidence) evidence({ phase: 'tool-receipt-decide', id: args.receipt_id, decision: args.decision })
+        return { ok: true, receipt: r.receipt, message: '回执已裁定 ' + args.decision }
+      } catch (e) { return { ok: false, error: e && e.code ? e.code : 'RECEIPT_DECIDE_FAILED', message: String(e && e.message ? e.message : e) } }
     },
   })
 

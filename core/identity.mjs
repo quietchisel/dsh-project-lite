@@ -96,3 +96,47 @@ export function authorizeWrite({ links, projectId, sessionId, op, manual } = {})
   }
   return { mode: 'primary', session_id: sessionId, op };
 }
+
+/**
+ * 0.19 受限回执授权（与 authorizeWrite 完全独立）。
+ *
+ * 它不是放宽权威写，而是一项范围极窄的新能力：让「已关联目标项目、被派单的 supporting/branch 会话」
+ * 只能提交「派给自己的任务」的回执。它不碰项目权威字段、不碰 checkpoint、不碰 primary、
+ * 不碰 transferPrimary、不自动确认任务完成。authorizeWrite 的规则在本函数里没有任何改动。
+ *
+ * @param links       project_session 记录（含 unlinked）
+ * @param task        目标 task 记录（由 store 按 task_id 取，不由参数伪造）
+ * @param projectId   宿主上下文已定的项目（来自 tool 的 args，但要与 task 核对）
+ * @param sessionId   宿主注入的会话 id（callerContext），可为 null → fail-closed
+ * @param op          操作名，仅用于审计
+ */
+export function authorizeTaskReceipt({ links, task, projectId, sessionId, op } = {}) {
+  if (!sessionId) {
+    throw new IdentityError('IDENTITY_UNAVAILABLE', '拿不到宿主注入的会话身份，回执写入被拒绝（fail-closed）', { op, project_id: projectId })
+  }
+  if (!task) {
+    throw new IdentityError('TASK_NOT_FOUND', '任务不存在，拒绝提交回执', { op, project_id: projectId, session_id: sessionId })
+  }
+  if (!projectId || task.project_id !== projectId) {
+    throw new IdentityError('TASK_PROJECT_MISMATCH', '任务不属于目标项目，拒绝跨项目回执', { op, project_id: projectId, task_id: task.id, session_id: sessionId })
+  }
+  // 会话必须是该项目的有效关联会话，且角色为 supporting/branch（primary 不需要回执）。
+  const mine = (links || []).filter((l) => l && l.project_id === projectId && l.session_id === sessionId && l.unlinked !== true)
+  if (mine.length === 0) {
+    throw new IdentityError('NOT_ASSOCIATED', '当前会话未关联该项目，不能提交回执', { op, project_id: projectId, session_id: sessionId })
+  }
+  const supporting = mine.find((l) => l.role === 'supporting' || l.role === 'branch')
+  if (!supporting) {
+    throw new IdentityError('RECEIPT_PRIMARY_NOT_ALLOWED', 'primary 不提交任务回执（回执仅面向 supporting/branch 分支）', { op, project_id: projectId, session_id: sessionId })
+  }
+  // 任务必须派给当前会话（不允许提交别人的回执）。
+  if (task.assigned_session_id !== sessionId) {
+    throw new IdentityError('NOT_ASSIGNED', '该任务未派给当前会话，拒绝提交回执', { op, project_id: projectId, task_id: task.id, session_id: sessionId, assigned_to: task.assigned_session_id ?? null })
+  }
+  // 任务生命周期：只有 active 且验收未 accepted/cancelled 时能回执。
+  const acc = task.acceptance
+  if (task.lifecycle !== 'active' || acc === 'accepted' || acc === 'cancelled') {
+    throw new IdentityError('TASK_NOT_RECEIVABLE', '任务当前状态不可提交回执（已结束/已接受/已取消）', { op, project_id: projectId, task_id: task.id, lifecycle: task.lifecycle, acceptance: acc })
+  }
+  return { mode: 'task-receipt', session_id: sessionId, task_id: task.id, project_id: projectId, op }
+}

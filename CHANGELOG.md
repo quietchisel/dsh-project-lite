@@ -8,6 +8,21 @@
 
 （暂无）
 
+## [0.19.0] - 2026-11-20
+
+### 新增（多分支协作：主对话派单 + 受限任务回执）
+
+- **方案 A 第一版 MVP**：主对话（primary）建任务并派单给 supporting 分支；分支执行后提交「不可直接生效」的任务回执；正式任务状态仍由 primary 裁定，人工确认边界不变。
+- **task_receipt 表（第 9 张）**：接入 spec/expected_counts/JOURNALED/后向兼容；旧库 8 表基线用新代码打开不降级（实测 writable=true degraded=false）。回执状态 submitted/accepted/rejected，裁定后不可再改。
+- **task 派单字段**：task 增 assigned_session_id；状态机 todo→assigned→submitted→accepted/rejected（含 blocked 建议、cancelled），分支回执只把任务置 implemented_unverified（做完待验），accepted 只由 primary 裁定写入。
+- **独立受限授权 authorizeTaskReceipt()**：与 authorizeWrite 完全独立；只有「已关联目标项目、被派单的 supporting/branch 会话」能提交派给自己的回执。authorizeWrite 函数体、primary 唯一性、manual 边界、transferPrimary 均未改动。
+- **withOp 授权分派**：submitTaskReceipt 走受限授权；assignTask/decideTaskReceipt 按 task/回执所属项目反查 project_id 走权威写闸（修复了两处原本会绕过授权的隐患）。
+- **4 个 Agent 工具**：task_dispatch（primary 派单）、task_receipts（只读查回执）、task_receipt_submit（supporting 提交回执，身份取自 exec）、task_receipt_decide（primary 裁定）。工具总数 7→11。
+
+### 测试
+
+- 新增 s40-receipt-permissions（12/12，权限反例含跨项目/越权/重复/二次裁定）、s41-receipt-state-machine（8/8）、s42-receipt-e2e（9/9，三分支并行→回执→裁定→新会话 Resume）。全量 35 套全绿。
+
 ## [0.18.0] - 2026-11-20
 
 ### 新增（Resume 工作区→项目只读解析）

@@ -10,9 +10,9 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { buildSpec, TABLES, VERSION, MetaSchema, initialMeta } from './spec.mjs'
 import { scanUnit, evaluate, META_STATE } from './guard.mjs'
-import { newProjectId, newDeliverableId, newLogId, newCheckpointId, linkKey, nowIso, validateNextAction } from './util.mjs'
+import { newProjectId, newDeliverableId, newLogId, newCheckpointId, newReceiptId, newTaskId, linkKey, nowIso, validateNextAction } from './util.mjs'
 import { createJournal, fingerprintOf, canon, STATES as JOURNAL_STATES } from './journal.mjs'
-import { assertNoSpoofedActor, authorizeWrite, callerContext } from './identity.mjs'
+import { assertNoSpoofedActor, authorizeWrite, authorizeTaskReceipt, callerContext } from './identity.mjs'
 import { crashPoint, pausePoint } from './fault.mjs'
 import { validateAttributionTarget } from './attribution.mjs'
 
@@ -392,11 +392,33 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     const effectiveSession = (caller && caller.sessionId) || sessionId
     const enforce = (caller && caller.enforce === true) || enforceIdentity
     if (enforce) {
-      const pid = projectIdOf(name, args)
-      if (pid) {
+      if (name === 'submitTaskReceipt') {
+        // 0.19 受限回执写：走独立授权，绝不进入 authorizeWrite 权威写闸。
+        // task 由 store 按 task_id 取（不信任参数）；project_id 必须和 task 一致由授权函数校验。
+        const task = (typeof store.task === 'function' ? store.task(args && args.task_id) : null) || (args && args.task)
+        store.lastAuthorization = authorizeTaskReceipt({
+          links: store.links(), task,
+          projectId: args && args.project_id, sessionId: effectiveSession, op: name,
+        })
+      } else if (name === 'assignTask') {
+        // 派单按 task 所属项目走权威写闸（参数只有 task_id）。
+        const tk = (typeof store.task === 'function' ? store.task(args && args.task_id) : null)
+        const pid = tk ? tk.project_id : null
+        if (!pid) throw Object.assign(new Error('任务不存在，无法派单'), { code: 'TASK_NOT_FOUND' })
         store.lastAuthorization = authorizeWrite({ links: store.links(), projectId: pid, sessionId: effectiveSession, op: name, manual: args && args.manual })
-      } else if (name === 'createProject' && !effectiveSession && !(args && args.manual && args.manual.authorized === true)) {
-        authorizeWrite({ links: [], projectId: null, sessionId: effectiveSession, op: name })
+      } else if (name === 'decideTaskReceipt') {
+        // 裁定回执按回执所属项目走权威写闸（参数只有 id，需反查 project_id）。
+        const rec = (typeof store.receipt === 'function' ? store.receipt(args && args.id) : null)
+        const pid = rec ? rec.project_id : null
+        if (!pid) throw Object.assign(new Error('回执不存在，无法裁定'), { code: 'RECEIPT_NOT_FOUND' })
+        store.lastAuthorization = authorizeWrite({ links: store.links(), projectId: pid, sessionId: effectiveSession, op: name, manual: args && args.manual })
+      } else {
+        const pid = projectIdOf(name, args)
+        if (pid) {
+          store.lastAuthorization = authorizeWrite({ links: store.links(), projectId: pid, sessionId: effectiveSession, op: name, manual: args && args.manual })
+        } else if (name === 'createProject' && !effectiveSession && !(args && args.manual && args.manual.authorized === true)) {
+          authorizeWrite({ links: [], projectId: null, sessionId: effectiveSession, op: name })
+        }
       }
     }
     const lock = await journal.acquire()
@@ -612,6 +634,125 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
       await writeLog('update', 'checkpoint', id, '人工拒绝检查点' + (rejected_by ? '：' + String(rejected_by) : ''), before.rev, next.rev)
       await refreshBaseline()
       return { checkpoint: next, changed: true }
+    },
+
+    /**
+     * 0.19 多分支协作：primary 建任务（权威写，走 authorizeWrite）。
+     * 只有 primary 能建任务；assigned_session_id 可空（todo）。
+     */
+    async createTask({ project_id, title, objective, assigned_session_id, source_id, workflow, acceptance_criteria, note, client_request_id } = {}) {
+      assertWritable()
+      if (!project_id) throw new StoreError('INVALID_INPUT', 'project_id 必填')
+      const proj = dview.table('project').get(project_id)
+      if (!proj || proj.status === 'deleted') throw new StoreError('PROJECT_NOT_FOUND', '项目不存在或在回收站：' + project_id)
+      const t = String(title ?? '').trim(), o = String(objective ?? '').trim()
+      if (!t || !o) throw new StoreError('INVALID_INPUT', 'title / objective 必填')
+      const id = newTaskId()
+      const rec = {
+        id, source_id: source_id ? String(source_id) : id, source_domain: 'manual', source_path: 'manual:' + id,
+        title: t, objective: o, lifecycle: 'active', acceptance: 'pending',
+        project_id, project_confidence: 'confirmed', project_basis: 'primary 建任务派单',
+        assigned_session_id: assigned_session_id ? String(assigned_session_id) : null,
+        updated_at: nowIso(), rev: 1,
+      }
+      if (workflow) rec.workflow = workflow
+      if (Array.isArray(acceptance_criteria)) rec.acceptance_criteria = acceptance_criteria.slice(0, 20).map(String)
+      if (note) rec.note = String(note)
+      assertRecord('task', rec)
+      await putJ('task', id, rec)
+      await writeLog('create', 'task', id, '建任务：' + t.slice(0, 40), null, 1)
+      await refreshBaseline()
+      return { task: rec, changed: true, client_request_id: client_request_id || null }
+    },
+
+    /**
+     * 0.19：primary 派单 / 改派（权威写）。只能把任务派给该项目的有效 supporting 会话。
+     * assigned_session_id = null 表示撤销派单。
+     */
+    async assignTask({ task_id, assigned_session_id, expected_rev, client_request_id } = {}) {
+      assertWritable()
+      const before = dview.table('task').get(task_id)
+      if (!before) throw new StoreError('TASK_NOT_FOUND', '任务不存在：' + task_id)
+      if (before.acceptance === 'accepted' || before.acceptance === 'cancelled' || before.lifecycle === 'closed') {
+        throw new StoreError('TASK_NOT_ASSIGNABLE', '已结束/已接受/已取消的任务不能派单')
+      }
+      if (expected_rev != null && Number(expected_rev) !== before.rev) {
+        throw new StoreError('REV_CONFLICT', '任务 rev 冲突：expected ' + expected_rev + ' actual ' + before.rev)
+      }
+      const sid = assigned_session_id ? String(assigned_session_id) : null
+      if (sid) {
+        const all = store.links()
+        const link = all.find((l) => l && l.project_id === before.project_id && l.session_id === sid && l.unlinked !== true && (l.role === 'supporting' || l.role === 'branch'))
+        if (!link) throw new StoreError('ASSIGNEE_NOT_SUPPORTING', '只能派给该项目的有效 supporting/branch 会话')
+      }
+      const next = { ...before, assigned_session_id: sid, updated_at: nowIso(), rev: before.rev + 1 }
+      assertRecord('task', next)
+      await putJ('task', task_id, next)
+      await writeLog('update', 'task', task_id, sid ? '派单给 ' + sid : '撤销派单', before.rev, next.rev)
+      await refreshBaseline()
+      return { task: next, changed: true, client_request_id: client_request_id || null }
+    },
+
+    /**
+     * 0.19：supporting 提交任务回执（受限授权，withOp 里走 authorizeTaskReceipt）。
+     * 回执落 submitted，任务置 implemented_unverified（做完待验）——不等于 accepted。
+     */
+    async submitTaskReceipt({ task_id, project_id, source_session_id, source_session_role, summary, deliverables, result, client_request_id } = {}) {
+      assertWritable()
+      const before = dview.table('task').get(task_id)
+      if (!before) throw new StoreError('TASK_NOT_FOUND', '任务不存在：' + task_id)
+      const dup = store.receipts().find((r) => r && r.task_id === task_id && r.source_session_id === source_session_id && r.status === 'submitted')
+      if (dup) throw new StoreError('RECEIPT_ALREADY_SUBMITTED', '该会话已对本任务提交过待裁定回执：' + dup.id)
+      const rr = String(result ?? 'completed')
+      if (!['completed', 'blocked', 'needs_revision'].includes(rr)) throw new StoreError('INVALID_INPUT', 'result 只能是 completed/blocked/needs_revision')
+      const sm = String(summary ?? '').trim()
+      if (sm.length < 2 || sm.length > 500) throw new StoreError('INVALID_INPUT', 'summary 必填且 2-500 字')
+      const id = newReceiptId(), now = nowIso()
+      const rec = {
+        id, task_id, project_id, source_session_id,
+        source_session_role: source_session_role === 'branch' ? 'branch' : 'supporting',
+        summary: sm, result: rr, status: 'submitted', created_at: now, rev: 1,
+      }
+      const dv = Array.isArray(deliverables) ? deliverables.slice(0, 20).map((x) => String(x).trim()).filter(Boolean) : []
+      if (dv.length) rec.deliverables = dv
+      assertRecord('task_receipt', rec)
+      await putJ('task_receipt', id, rec)
+      const nextTask = { ...before, acceptance: 'implemented_unverified', updated_at: now, rev: before.rev + 1 }
+      assertRecord('task', nextTask)
+      await putJ('task', task_id, nextTask)
+      await writeLog('update', 'task_receipt', id, '提交回执（待裁定）：' + sm.slice(0, 40), null, 1)
+      await writeLog('update', 'task', task_id, '回执触发：做完待验（非 accepted）', before.rev, nextTask.rev)
+      await refreshBaseline()
+      return { receipt: rec, task: nextTask, changed: true, client_request_id: client_request_id || null }
+    },
+
+    /** 0.19：primary 裁定回执（权威写）——accepted/rejected，并同步任务正式状态。 */
+    async decideTaskReceipt({ id, decision, note, expected_rev, client_request_id } = {}) {
+      assertWritable()
+      const before = dview.table('task_receipt').get(id)
+      if (!before) throw new StoreError('RECEIPT_NOT_FOUND', '回执不存在：' + id)
+      if (before.status !== 'submitted') throw new StoreError('RECEIPT_NOT_SUBMITTED', '只有 submitted 回执可裁定（当前 ' + before.status + '）')
+      if (decision !== 'accepted' && decision !== 'rejected') throw new StoreError('INVALID_INPUT', 'decision 只能是 accepted/rejected')
+      if (expected_rev != null && Number(expected_rev) !== before.rev) throw new StoreError('REV_CONFLICT', '回执 rev 冲突')
+      const now = nowIso()
+      const next = { ...before, status: decision, rev: before.rev + 1 }
+      if (decision === 'accepted') { next.confirmed_at = now; next.confirmed_by = 'primary-decision' }
+      else { next.rejected_at = now; next.rejected_by = 'primary-decision' }
+      if (note) { if (decision === 'accepted') next.accepted_note = String(note); else next.rejected_note = String(note) }
+      assertRecord('task_receipt', next)
+      await putJ('task_receipt', id, next)
+      const taskBefore = dview.table('task').get(before.task_id)
+      if (taskBefore) {
+        const tnext = decision === 'accepted'
+          ? { ...taskBefore, lifecycle: 'closed', acceptance: 'accepted', updated_at: now, rev: taskBefore.rev + 1 }
+          : { ...taskBefore, lifecycle: 'active', acceptance: 'pending', assigned_session_id: null, updated_at: now, rev: taskBefore.rev + 1 }
+        assertRecord('task', tnext)
+        await putJ('task', before.task_id, tnext)
+        await writeLog('update', 'task', before.task_id, '回执裁定 ' + decision, taskBefore.rev, tnext.rev)
+      }
+      await writeLog('update', 'task_receipt', id, '裁定回执：' + decision, before.rev, next.rev)
+      await refreshBaseline()
+      return { receipt: next, changed: true, client_request_id: client_request_id || null }
     },
 
     /**
@@ -1088,6 +1229,9 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     logs: () => visibleAll('changelog'),
     checkpoints: () => visibleAll('checkpoint'),
     checkpoint: (id) => visibleRecord('checkpoint', id, dview.table('checkpoint').get(id)),
+    receipts: () => visibleAll('task_receipt'),
+    receipt: (id) => visibleRecord('task_receipt', id, dview.table('task_receipt').get(id)),
+    task: (id) => visibleRecord('task', id, dview.table('task').get(id)),
     deliverables: () => visibleAll('deliverable'),
     workspaces: () => visibleAll('project_workspace'),
     visibleAll,
@@ -1298,7 +1442,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   })
 
   // S1-A：所有写入口统一走 journal。嵌套写自动合并成同一个操作（createProject → linkSession）。
-  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime', 'proposeCheckpoint', 'confirmCheckpoint', 'rejectCheckpoint']
+  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime', 'proposeCheckpoint', 'confirmCheckpoint', 'rejectCheckpoint', 'createTask', 'assignTask', 'submitTaskReceipt', 'decideTaskReceipt']
   for (const name of JOURNALED) {
     const impl = store[name]
     if (typeof impl !== 'function') continue

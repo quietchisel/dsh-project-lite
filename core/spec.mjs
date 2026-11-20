@@ -250,6 +250,30 @@ export const CheckpointSchema = z.object({
   rev: z.number().int().positive(),
 })
 
+/**
+ * 0.19 多分支协作：任务回执（supporting 分支提交、不可直接生效）。
+ * 与 checkpoint 职责分离：checkpoint 是跨会话权威进展，receipt 是分支交付证据；
+ * receipt 的 accepted/rejected 由 primary 裁定，不自动生效。
+ * source_session_id 只来自宿主 exec（工具层保证），不接受参数冒充。
+ */
+export const TaskReceiptSchema = z.object({
+  id: z.string().regex(/^rcp_[0-9A-HJKMNP-TV-Z]{26}$/),
+  task_id: z.string().min(1),
+  project_id: z.string().min(1),
+  source_session_id: z.string().min(1),
+  source_session_role: z.enum(['supporting', 'branch']),
+  summary: z.string().min(2).max(500),
+  deliverables: z.array(z.string()).max(20).optional(),
+  result: z.enum(['completed', 'blocked', 'needs_revision']),
+  status: z.enum(['submitted', 'accepted', 'rejected']),
+  created_at: Iso,
+  confirmed_at: Iso.optional(),
+  confirmed_by: z.string().optional(),
+  rejected_at: Iso.optional(),
+  rejected_by: z.string().optional(),
+  rev: z.number().int().positive(),
+})
+
 /** 全局单例。注意 defineDomain 拒绝"能接受 null 的 global schema"。 */
 export const MetaSchema = z.object({
   schema_version: z.number().int().nonnegative(),
@@ -294,7 +318,7 @@ export const initialMeta = (writer) => ({
   prefs: { suppress_suggest: false, suppress_until: null },
 })
 
-export const TABLES = ['project', 'project_session', 'changelog', 'project_workspace', 'deliverable', 'task', 'task_session', 'checkpoint']
+export const TABLES = ['project', 'project_session', 'changelog', 'project_workspace', 'deliverable', 'task', 'task_session', 'checkpoint', 'task_receipt']
 
 /**
  * @param extraProject 仅用于版本兼容实验：给 project 增加可选字段（模拟"v2 新增字段"）。
@@ -315,6 +339,7 @@ export function buildSpec({ version = VERSION, compatibleVersions, writer = 'dsh
       task: domainTable(TaskSchema),
       task_session: domainTable(TaskSessionSchema),
       checkpoint: domainTable(CheckpointSchema),
+      task_receipt: domainTable(TaskReceiptSchema),
     },
   }
   if (compatibleVersions !== undefined) spec.compatibleVersions = compatibleVersions
