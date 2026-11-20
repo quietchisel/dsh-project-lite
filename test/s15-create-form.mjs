@@ -206,14 +206,14 @@ await flush()
 push('E17', calls.filter((c) => c.method === 'POST').length === postsBefore, '降级态即使触发 onClick 也不发请求（前端闸）')
 
 // --- 静态边界 ---
-push('E18', (src.match(/slots\.inject\(/g) || []).length === 6, '注入 6 个 slot（main + sidebar.panellist + 3×shell.overlay + 会话头徽标）')
-push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 14
+push('E18', (src.match(/slots\.inject\(/g) || []).length === 7, '注入 7 个 slot（main + sidebar.panellist + 4×shell.overlay[含0.21收件箱] + 会话头徽标）')
+push('E19', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 16
   && src.includes("API_CREATE = 'api/project/create'") && src.includes("API_LINK = 'api/project/link'")
   && src.includes("API_ARCHIVE = 'api/project/archive'") && src.includes("API_RESTORE = 'api/project/restore'")
   && src.includes("API_UNLINK = 'api/project/unlink'") && src.includes("API_DELETE = 'api/project/delete'")
   && src.includes("API_LINK_WORKSPACE = 'api/project/link-workspace'") && src.includes("API_UNLINK_WORKSPACE = 'api/project/unlink-workspace'")
   && src.includes("API_DELIVERABLE = 'api/project/deliverable'"),
-  '十四处 POST 调用点（含工作区/交付物浮层 + 检查点确认/拒绝），端点十个')
+  '十六处 POST 调用点（含工作区/交付物浮层 + 检查点确认/拒绝 + 0.21回执裁定/项目收敛），端点十二个')
 push('E20', src.includes("const API_CREATE = 'api/project/create'"), '写路径常量就是 api/project/create')
 
 const pass = steps.filter((s) => s.ok).length

@@ -65,6 +65,7 @@ function taskView(t) {
     project_confidence: t.project_confidence ?? null,
     project_basis: t.project_basis ?? null,
     primary_session_id: t.primary_session_id ?? null,
+    assigned_session_id: t.assigned_session_id ?? null,
     source_updated_at: t.source_updated_at ?? null,
     updated_at: t.updated_at,
     rev: t.rev,
@@ -186,7 +187,12 @@ export function createReadService(store, options = {}) {
 
   /** 项目总览：四组 + 计数 + 摘要列表。 */
   function overview() {
-    const projects = store.projects().map(projectSummary)
+    // 0.21 A：给每个项目补 active primary 计数，供会话右键浮层智能推荐角色（无 primary→primary，否则 supporting）。
+    const primaryCount = new Map()
+    for (const l of tableAll(store, 'project_session')) {
+      if (l && l.role === 'primary' && l.unlinked !== true) primaryCount.set(l.project_id, (primaryCount.get(l.project_id) || 0) + 1)
+    }
+    const projects = store.projects().map((p) => ({ ...projectSummary(p), primary_count: primaryCount.get(p.id) || 0 }))
     const groups = STATUS_GROUPS.map((key) => {
       const items = projects.filter((p) => p.status === key)
       return { key, count: items.length, items }
@@ -206,8 +212,8 @@ export function createReadService(store, options = {}) {
     if (!p) {
       return snapshot({
         ok: true, found: false, project: null,
-        sessions: [], workspaces: [], tasks: [], deliverables: [], logs: [],
-        counts: { sessions: 0, workspaces: 0, tasks: 0, tasks_stale: 0, deliverables: 0, logs: 0, unconfirmed: 0 },
+        sessions: [], workspaces: [], tasks: [], deliverables: [], logs: [], receipts: [],
+        counts: { sessions: 0, workspaces: 0, tasks: 0, tasks_stale: 0, deliverables: 0, logs: 0, receipts: 0, unconfirmed: 0 },
         ...common(),
       })
     }
@@ -251,6 +257,10 @@ export function createReadService(store, options = {}) {
       })
       .sort((a, b) => String(a.source_id || '~').localeCompare(String(b.source_id || '~')))
     const myTaskIds = new Set(tasks.map((t) => t.id))
+    // 0.21 B：该项目的任务回执（供面板显示接受/拒绝按钮）。裁定仍走服务端权威入口，这里只读。
+    const receipts = tableAll(store, 'task_receipt')
+      .filter((r) => r && (r.project_id === id || myTaskIds.has(r.task_id)))
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
     /**
      * 0.15.0：交付物按**两条路**归属到项目——
      *   ① 直接挂在本项目（d.project_id === id，老数据走这条）；
@@ -291,7 +301,7 @@ export function createReadService(store, options = {}) {
     return snapshot({
       ok: true, found: true,
       project,
-      sessions: links, workspaces, tasks, deliverables, logs,
+      sessions: links, workspaces, tasks, deliverables, logs, receipts,
       counts: {
         sessions: links.length,
         workspaces: workspaces.length,
@@ -299,9 +309,11 @@ export function createReadService(store, options = {}) {
         tasks_stale: staleCount,
         deliverables: deliverables.length,
         logs: logs.length,
+        receipts: receipts.length,
         unconfirmed: unconfirmed.length,
       },
       unconfirmed,
+      completion_candidate: completionCandidate(id),
       ...common(),
     })
   }
@@ -336,6 +348,47 @@ export function createReadService(store, options = {}) {
       }
     }
     return snapshot({ ok: true, q: String(q ?? ''), status, total: hits.length, hits, ...common() })
+  }
+
+  /**
+   * 0.21 完成候选（纯派生，不落盘）：判断任务侧是否满足可以收敛项目。
+   * 只说明任务侧条件，不自动证明 done_when 的自然语言条件已达成，最终由 primary 人工确认。
+   * 计算口径：无 active 任务、无 submitted 待裁定回执、无 rejected 待重做任务、且至少一条 accepted，
+   * 才算 candidate=true。项目自身已是 done/archived/deleted 时不再提示。
+   */
+  function completionCandidate(id) {
+    const p = store.project(id)
+    if (!p) return { applicable: false, candidate: false, reason: 'project_not_found' }
+    if (['done', 'archived', 'deleted'].includes(p.status)) return { applicable: false, candidate: false, reason: 'already_terminal', status: p.status }
+    // 复用 getProject 的动态归属口径：任务属于本项目（confirmed 钉住 或 主会话挂本项目）。
+    const sessionProject = new Map()
+    for (const l of tableAll(store, 'project_session')) {
+      if (!l || l.unlinked === true) continue
+      sessionProject.set(l.session_id, sessionProject.has(l.session_id) ? null : l.project_id)
+    }
+    const mine = tableAll(store, 'task').filter((t) => {
+      if (!t) return false
+      if (t.project_confidence === 'confirmed' && t.project_id) return t.project_id === id
+      const derived = t.primary_session_id ? sessionProject.get(t.primary_session_id) : undefined
+      return derived === id
+    })
+    const all = mine.length
+    const accepted = mine.filter((t) => t.acceptance === 'accepted').length
+    const active = mine.filter((t) => t.lifecycle === 'active' && t.acceptance !== 'implemented_unverified').length
+    const needsDecision = mine.filter((t) => t.acceptance === 'implemented_unverified').length
+    const rejected = mine.filter((t) => t.acceptance === 'cancelled').length
+    const taskIds = new Set(mine.map((t) => t.id))
+    const receipts = tableAll(store, 'task_receipt').filter((r) => r && taskIds.has(r.task_id))
+    const submitted = receipts.filter((r) => r.status === 'submitted').length
+    const candidate = all > 0 && accepted > 0 && active === 0 && needsDecision === 0 && submitted === 0 && rejected === 0
+    return {
+      applicable: true,
+      candidate,
+      counts: { total: all, accepted, active, needs_decision: needsDecision, submitted_receipts: submitted, rejected },
+      done_when: Array.isArray(p.done_when) ? p.done_when : [],
+      status: p.status,
+      message: candidate ? '所有任务已完成，等待项目最终确认' : null,
+    }
   }
 
   /**
@@ -425,9 +478,10 @@ export function createReadService(store, options = {}) {
       relevant_deliverable_refs: relevantDeliverables,
       unconfirmed_count: unconfirmedCount,
       confidence_summary: confidenceSummary,
+      completion_candidate: completionCandidate(id),
       ...common(),
     })
   }
 
-  return { overview, getProject, linksOfSession, search, resume }
+  return { overview, getProject, linksOfSession, search, resume, completionCandidate }
 }

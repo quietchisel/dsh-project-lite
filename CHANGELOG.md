@@ -8,6 +8,26 @@
 
 （暂无）
 
+## [0.21.0] - 2026-11-21
+
+### 新增（减负改造第一批 A-D + 第二批三件）
+
+依据外审建议书 + 本机 DSH app.asar 接口核实（实测版本 0.2.2-rc.5）立项施工。核心原则：加入口、不加机制，复用现有服务，零新表零迁移。
+
+- **A 会话右键角色智能默认**：右键「加入项目」浮层按项目 active primary 数智能推荐角色（无 primary→primary、有→supporting），可下拉手动覆盖；显示「已加入」避免重复关联。overview 项目补 primary_count。服务端单 primary 约束与 authorizeWrite 不变。
+- **B 回执面板裁定按钮**：项目详情新增「任务回执」区，submitted 回执直接「接受/拒绝」，走现有 task_receipt_decide 权威服务（HTTP 路由 receipt-decide + 服务端状态校验），点击即人工确认、无二次弹窗；getProject 带 receipts。
+- **C 任务行隐藏内部 ID**：summary 默认只显示状态+标题，source_id 移入展开区（展开可见/可复制），不改变数据结构。
+- **D 受控 project_update**：新增 Agent 工具 + HTTP 路由，仅允许 status（active/paused/done，archived/deleted 须走专属路由）与 next_action；字段白名单 + 单 primary + CAS(expected_rev) + 状态枚举校验；面板收敛按钮与 Agent 工具共用同一写入服务。
+- **第二批 P3 会话发现**：会话候选路由改走公开 sessionQuery seam（运行时探测 ctx.get('sessionQuery')），拿不到自动回退 registry(projcache)，不把主程序能力当插件已验证事实；证据日志记 source。
+- **第二批 共享收件箱**：会话右键「查看我的待办」浮层，按 session_id 读现有任务记录列待办（标题/目标/验收/状态），读现有任务权威、不另建数据。
+- **第二批 done_when 完成候选**：read.completionCandidate 纯派生计算（无落盘），项目详情在任务侧全 accepted 且无 active/未裁定/被退回任务时显示「完成候选」提示 + done_when 原文 + 「确认完成并收敛项目」按钮；系统只提示、不自动宣布完成，最终由 primary 人工确认后调 project_update。
+- **测试**：新增 s44-reduction（13/13：白名单/CAS/权限/完成候选/receipts/inbox/primary_count）；同步 s12/s13/s14/s15 计数断言（路由 20→23、slot 6→7、POST 14→16）。全量 36+ 套全绿。
+
+### 边界
+
+- 未改 Resume/Checkpoint/工作区解析/回执闭环等已验证机制；peer messaging 经源码核实受「同一 root tree」限制，本批不采用，走共享收件箱兜底。
+- 未推远端、未建 Release/tag。
+
 ## [0.20.1] - 2026-11-20
 
 ### 修复 建议标题短名截断

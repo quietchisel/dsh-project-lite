@@ -118,8 +118,8 @@ async function runHealthy() {
 
   // ---- 1 注册契约 ----
   const expected = [STATE_PATH, ...Object.values(READ_PATHS), CREATE_PATH, SESSIONS_PATH, LINK_PATH, ARCHIVE_PATH, RESTORE_PATH, UNLINK_PATH, DELETE_PATH, WORKSPACES_PATH, LINK_WORKSPACE_PATH, UNLINK_WORKSPACE_PATH, DELIVERABLE_PATH, UNLINK_DELIVERABLE_PATH]
-  push('A-1', '20 条路由全部注册（+0.14 交付物/+0.17 检查点）',
-    expected.every((p) => routes.has(p)) && routes.size === 20,
+  push('A-1', '23 条路由全部注册（+0.14 交付物/+0.17 检查点/+0.21 裁定·更新·收件箱）',
+    expected.every((p) => routes.has(p)) && routes.size === 23,
     'registered=' + [...routes.keys()].join(','))
   push('A-2', 'create 路由是 kind:exact', routes.get(CREATE_PATH)?.kind === 'exact',
     'kind=' + routes.get(CREATE_PATH)?.kind)

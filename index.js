@@ -70,6 +70,10 @@ export const UNLINK_DELIVERABLE_PATH = '/api/project/unlink-deliverable'
 export const CHECKPOINTS_PATH = '/api/project/checkpoints'
 export const CONFIRM_CHECKPOINT_PATH = '/api/project/checkpoint-confirm'
 export const REJECT_CHECKPOINT_PATH = '/api/project/checkpoint-reject'
+/** 0.21 减负：回执裁定 / 受控项目更新 / 共享收件箱（会话待办）。 */
+export const RECEIPT_DECIDE_PATH = '/api/project/receipt-decide'
+export const PROJECT_UPDATE_PATH = '/api/project/update'
+export const INBOX_PATH = '/api/project/inbox'
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -121,6 +125,46 @@ export function apply(ctx, config = {}) {
   const evidencePath = config.evidencePath || join(dshHome(), 'project-lite', 'evidence.jsonl')
   // 1.4：会话注册表与项目域同根（都读 <home>/storages），不另配一个路径。
   const registry = createSessionRegistry({ root })
+
+  /**
+   * 0.21 P3：会话发现优先级——公开 sessionQuery seam 优先，拿不到回退 registry（projcache）。
+   * 主程序 app.asar 有 sessionQuery ≠ 插件 ctx 能注入；运行时探测，绝不把未验证能力当既有。
+   * 返回 {ok, sessions:[{session_id,title,cwd,live,persisted}], source:'sessionQuery'|'registry', degraded }.
+   */
+  let sqProbeDone = false
+  let sqSvc = null
+  async function discoverSessions({ q = '', limit = 50 } = {}) {
+    if (!sqProbeDone) {
+      sqProbeDone = true
+      try { sqSvc = (typeof ctx.get === 'function') ? ctx.get('sessionQuery') : null } catch { sqSvc = null }
+      await evidence({ phase: 'session-query-probe', available: !!(sqSvc && typeof sqSvc.listSessions === 'function') })
+    }
+    if (sqSvc && typeof sqSvc.listSessions === 'function') {
+      try {
+        const recs = await sqSvc.listSessions()
+        let items = (Array.isArray(recs) ? recs : (recs && Array.isArray(recs.sessions) ? recs.sessions : []))
+          .map((r) => {
+            const h = r && r.header
+            const sid = h && (h.id || h.session_id) || (r && r.id)
+            return {
+              session_id: sid,
+              title: (h && (h.title || h.name)) || r.title || null,
+              cwd: (h && h.cwd) || r.cwd || null,
+              live: !!(r && r.live), persisted: !!(r && r.persisted),
+            }
+          }).filter((x) => x.session_id)
+        if (q) items = items.filter((x) => String(x.session_id + ' ' + (x.title || '')).toLowerCase().includes(String(q).toLowerCase()))
+        items = items.slice(0, limit)
+        return { ok: true, sessions: items, source: 'sessionQuery', total: items.length, matched: items.length }
+      } catch (e) {
+        await evidence({ phase: 'session-query-error', message: String(e && e.message ? e.message : e) })
+        // 公开 seam 调用失败 → 本次回退 registry，不中断
+      }
+    }
+    const data = await registry.list({ q, limit })
+    return { ...data, source: 'registry' }
+  }
+
 
   // 审计 E：证据日志容量上限 + 少量轮转 + session_id 脱敏。
   // 不引第三方日志框架：超 MAX_BYTES 时 evidence.jsonl → .1 → .2（最多 2 个历史），再写新的。
@@ -394,7 +438,7 @@ export function apply(ctx, config = {}) {
       }
       const url = new URL(request.url)
       try {
-        const data = await registry.list({
+        const data = await discoverSessions({
           q: url.searchParams.get('q') || '',
           limit: url.searchParams.get('limit') || 50,
         })
@@ -402,7 +446,7 @@ export function apply(ctx, config = {}) {
           await evidence({ phase: 'sessions-unavailable', reason: data.reason })
           return jsonResponse(errorBody('REGISTRY_UNAVAILABLE', data.reason || '读不到 DSH 会话注册表'), 200)
         }
-        await evidence({ phase: 'sessions-served', matched: data.matched, returned: data.sessions.length })
+        await evidence({ phase: 'sessions-served', matched: data.matched, returned: data.sessions.length, source: data.source })
         return jsonResponse({ ...data, at: new Date().toISOString() })
       } catch (error) {
         const message = String(error && error.message ? error.message : error)
@@ -978,6 +1022,114 @@ export function apply(ctx, config = {}) {
       },
     }))
   }
+  // ---- 0.21 B：回执裁定（面板按钮 → 复用 s.decideTaskReceipt 权威入口，服务端二次校验 primary）----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: RECEIPT_DECIDE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + RECEIPT_DECIDE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const decision = body.decision === 'accepted' || body.decision === 'rejected' ? body.decision : ''
+      if (!id || !decision) return writeJson(res, 400, errorBody('MISSING_PARAM', 'need id and decision(accepted/rejected)'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝裁定：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'receipt-decide', id, decision })
+        const claimed = await s.claimRequest(body.requestId, actKey, () =>
+          s.decideTaskReceipt({ id, decision, note: body.note, expected_rev: body.expected_rev, client_request_id: body.requestId }))
+        const out = claimed.value
+        // 面板路径 = 人工确认本身（与 checkpoint-confirm 同口径）：openStore 未开 enforceIdentity，
+        // 授权来自「人在 UI 点了」，写闸由 writable + claimRequest 幂等 + store 层状态校验把关。
+        // Agent 路径（task_receipt_decide 工具）另有 runAsCaller + authorizeWrite 会话级校验，两条入口互不绕过。
+        await evidence({ phase: 'receipt-decide-served', id, decision, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), receipt: out && out.receipt, replayed: claimed.replayed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'IDENTITY_UNAVAILABLE' || code === 'NOT_PRIMARY' || code === 'READONLY_DEGRADED' || code === 'REV_CONFLICT' || code === 'REQUEST_ID_CONFLICT' ? 409
+          : code === 'RECEIPT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'receipt-decide-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.21 D：受控项目更新（面板完成候选收敛按钮 → 复用 s.updateProject）----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PROJECT_UPDATE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return writeJson(res, 405, errorBody('METHOD_NOT_ALLOWED', 'only POST is allowed: ' + PROJECT_UPDATE_PATH))
+      const ctype = String((req.headers && req.headers['content-type']) || '').toLowerCase()
+      if (!ctype.startsWith('application/json')) return writeJson(res, 415, errorBody('JSON_REQUIRED', 'content-type must be application/json'))
+      let body
+      try { body = await readJsonBody(req) } catch (error) {
+        return writeJson(res, 400, errorBody('BAD_JSON', 'invalid JSON: ' + String(error && error.message ? error.message : error)))
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return writeJson(res, 400, errorBody('BAD_JSON', 'body must be an object'))
+      const pid = typeof body.project_id === 'string' ? body.project_id.trim() : ''
+      if (!pid) return writeJson(res, 400, errorBody('MISSING_PARAM', 'missing required body field: project_id'))
+      try {
+        const s = await getStore()
+        await s.refresh()
+        if (!s.writable) {
+          const d = s.degradationReport()
+          return writeJson(res, 409, { ...errorBody('READONLY_DEGRADED', '域只读，拒绝更新：' + (d.title || d.kind)), degradation: d })
+        }
+        const actKey = JSON.stringify({ op: 'project-update', pid, status: body.status ?? null, next_action: body.next_action ?? null, expected_rev: body.expected_rev ?? null })
+        const claimed = await s.claimRequest(body.requestId, actKey, () =>
+          s.updateProject({ project_id: pid, status: body.status, next_action: body.next_action, expected_rev: body.expected_rev, client_request_id: body.requestId }))
+        const out = claimed.value
+        await evidence({ phase: 'project-update-served', id: pid, status: body.status, replayed: claimed.replayed })
+        return writeJson(res, 200, { ok: true, at: new Date().toISOString(), project: out && out.project, changed: !!(out && out.changed), replayed: claimed.replayed })
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : 'INTERNAL_ERROR'
+        const message = String(error && error.message ? error.message : error)
+        const httpStatus = code === 'IDENTITY_UNAVAILABLE' || code === 'NOT_PRIMARY' || code === 'READONLY_DEGRADED' || code === 'REV_CONFLICT' || code === 'FIELD_NOT_ALLOWED' || code === 'REQUEST_ID_CONFLICT' ? 409
+          : code === 'PROJECT_NOT_FOUND' ? 404 : code === 'INTERNAL_ERROR' ? 500 : 400
+        await evidence({ phase: 'project-update-error', code, message })
+        return writeJson(res, httpStatus, errorBody(code, message))
+      }
+    },
+  }))
+
+  // ---- 0.21 共享收件箱：按会话 id 列出派给它的待办任务（只读，读现有任务记录，不另建权威）----
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: INBOX_PATH,
+    resource: async (req, res) => {
+      const url = new URL(req.url || '', 'http://127.0.0.1')
+      const sessionId = url.searchParams.get('session_id') || ''
+      if (!sessionId) return jsonResponse(errorBody('SESSION_ID_REQUIRED', 'need session_id'), 400)
+      try {
+        const s = await getStore()
+        await s.refresh()
+        const mine = (typeof s.tasks === 'function' ? s.tasks() : [])
+          .filter((t) => t && t.assigned_session_id === sessionId && t.lifecycle === 'active' && t.acceptance !== 'accepted' && t.acceptance !== 'cancelled')
+          .map((t) => ({
+            id: t.id, source_id: t.source_id || null, title: t.title, objective: t.objective,
+            acceptance: t.acceptance, project_id: t.project_id ?? null,
+            acceptance_criteria: Array.isArray(t.acceptance_criteria) ? t.acceptance_criteria : [],
+          }))
+        await evidence({ phase: 'inbox-served', session: sessionId, count: mine.length })
+        return jsonResponse({ ok: true, at: new Date().toISOString(), session_id: sessionId, total: mine.length, tasks: mine })
+      } catch (error) {
+        return jsonResponse(errorBody('INTERNAL_ERROR', String(error && error.message ? error.message : error)), 500)
+      }
+    },
+  }))
+
   // 卸载/关闭：先撤全部路由，再关自己的域（共享 facility 时绝不 closeAll）。
   ctx.effect(() => async () => {
     if (disposeTools) { try { disposeTools() } catch {} }

@@ -71,6 +71,10 @@ const API_STATE = 'api/project/state'
     const API_CHECKPOINTS = 'api/project/checkpoints'
     const API_CP_CONFIRM = 'api/project/checkpoint-confirm'
     const API_CP_REJECT = 'api/project/checkpoint-reject'
+    // 0.21 减负：回执裁定 / 项目收敛 / 共享收件箱
+    const API_RECEIPT_DECIDE = 'api/project/receipt-decide'
+    const API_PROJECT_UPDATE = 'api/project/update'
+    const API_INBOX = 'api/project/inbox'
 
     /**
      * 1.8：一次"用户意图"一个 requestId。
@@ -234,6 +238,8 @@ const API_STATE = 'api/project/state'
     const workspaceProjectRequest = createLinkRequest()
     // 0.14：文件/文件夹右键「加入交付物…」的共享请求。
     const deliverableRequest = createLinkRequest()
+    // 0.21：共享收件箱——会话右键「查看我的待办」的共享请求。
+    const inboxRequest = createLinkRequest()
 
     function Panel() {
       const statCard = (label, value, sub) => h('div', { style: C.statCard, 'data-stat-card': label },
@@ -375,6 +381,10 @@ const API_STATE = 'api/project/state'
       const [checkpoints, setCheckpoints] = useState([])
       const [cpBusy, setCpBusy] = useState(null)   // 正在操作的 checkpoint id
       const [cpMsg, setCpMsg] = useState(null)     // 操作反馈 {ok, text}
+    // 0.21：回执裁定 + 项目收敛
+    const [rcBusy, setRcBusy] = useState(null)
+    const [rcMsg, setRcMsg] = useState(null)
+    const [cvBusy, setCvBusy] = useState(false)
 
       /**
        * 提交新建。三条铁律：
@@ -506,6 +516,51 @@ const API_STATE = 'api/project/state'
           setCpMsg({ ok: false, text: String(e && e.message ? e.message : e) })
         } finally { setCpBusy(null) }
       }, [cpBusy, detail, loadCheckpoints])
+
+      /** 0.21 B：primary 在面板裁定回执（接受/拒绝）——点击即人工确认，调权威裁定服务。 */
+      const submitReceiptAction = useCallback(async (rc, decision) => {
+        if (rcBusy) return
+        setRcBusy(rc.id); setRcMsg(null)
+        try {
+          const res = await fetch(API_RECEIPT_DECIDE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: rc.id, decision, requestId: newRequestId(), expected_rev: rc.rev }),
+          })
+          let json = null; try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setRcMsg({ ok: true, text: '已' + (decision === 'accepted' ? '接受' : '拒绝') + '回执' })
+            if (detail && detail.id) {
+              const dr = await fetch(API_GET + '?id=' + encodeURIComponent(detail.id), { cache: 'no-store' })
+              try { const dj = await dr.json(); if (dj && dj.ok) setDetail({ id: detail.id, data: dj, err: null }) } catch (e) {}
+            }
+          } else {
+            setRcMsg({ ok: false, text: (json && json.error && (json.error.message || json.error.code)) || ('HTTP ' + res.status) })
+          }
+        } catch (e) { setRcMsg({ ok: false, text: String(e && e.message ? e.message : e) }) }
+        finally { setRcBusy(null) }
+      }, [rcBusy, detail])
+
+      /** 0.21：完成候选一键收敛——primary 确认后，调受控 project_update 改 status=done + next_action。 */
+      const convergeProject = useCallback(async (p, candidate) => {
+        if (cvBusy) return
+        setCvBusy(true); setRcMsg(null)
+        try {
+          const nextAction = '回顾项目交付物并归档到知识库（收敛后下一步）'
+          const res = await fetch(API_PROJECT_UPDATE, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ project_id: p.id, status: 'done', next_action: nextAction, expected_rev: p.rev, requestId: newRequestId() }),
+          })
+          let json = null; try { json = await res.json() } catch (e) { json = null }
+          if (json && json.ok) {
+            setRcMsg({ ok: true, text: '项目已收敛为 done' })
+            const dr = await fetch(API_GET + '?id=' + encodeURIComponent(p.id), { cache: 'no-store' })
+            try { const dj = await dr.json(); if (dj && dj.ok) setDetail({ id: p.id, data: dj, err: null }) } catch (e) {}
+          } else {
+            setRcMsg({ ok: false, text: (json && json.error && (json.error.message || json.error.code)) || ('HTTP ' + res.status) })
+          }
+        } catch (e) { setRcMsg({ ok: false, text: String(e && e.message ? e.message : e) }) }
+        finally { setCvBusy(false) }
+      }, [cvBusy])
 
       /** 打开项目详情（六分区）。失败只写 detail.err，不动主面板。 */
       const openDetail = useCallback(async (p) => {
@@ -1295,9 +1350,9 @@ const API_STATE = 'api/project/state'
             // 跟随会话是默认规则，不必每行重复；只有"人工钉住"才需要标出来。
             t.project_source === 'confirmed'
               ? h('span', { style: C.taskPinned, 'data-task-source-kind': 'confirmed', title: '人工钉住：解绑会话也不会走' }, '人工确认')
-              : null,
-            h('span', { style: C.taskCode }, t.source_id || '')),
+              : null),
           h('div', { style: C.projMeta }, '目标：' + (t.objective || '—')),
+          h('div', { style: C.projMeta, 'data-task-code': t.source_id || '' }, '编号：' + (t.source_id || t.id) + '（内部 ID 默认隐藏，展开可见）'),
           t.next_action ? h('div', { style: C.projMeta }, '下一步：' + (t.next_action)) : null,
           h('div', { style: C.projMeta }, '主会话：' + (t.primary_session_id || '—')),
           h('div', { style: C.projMeta },
@@ -1673,7 +1728,65 @@ const API_STATE = 'api/project/state'
               )
             })()
           ),
-        )
+        // 0.21 B：任务回执列表（submitted 待裁定 → primary 可直接接受/拒绝；其余只读展示）。
+        h('div', { style: C.detailFull, 'data-section': 'receipts', 'data-receipts': '1' },
+          (() => {
+            const rcs = Array.isArray(dd.receipts) ? dd.receipts : []
+            const pending = rcs.filter((r) => r && r.status === 'submitted')
+            const decided = rcs.filter((r) => r && r.status !== 'submitted')
+            const rcRow = (r) => h('div', {
+              key: r.id, style: Object.assign({}, C.statCard, { margin: '6px 0', flexDirection: 'column', alignItems: 'stretch' }),
+              'data-receipt-id': r.id, 'data-receipt-status': r.status,
+            },
+              h('div', { style: C.statLabel },
+                (r.status === 'accepted' ? '已接受' : r.status === 'rejected' ? '已拒绝' : '待裁定')
+                + ' · ' + (r.result || 'completed')
+                + ' · ' + (r.created_at ? String(r.created_at).slice(0, 16).replace('T', ' ') : '')),
+              h('div', { style: { fontSize: '12px', lineHeight: '1.6', margin: '4px 0' } }, String(r.summary || '')),
+              Array.isArray(r.deliverables) && r.deliverables.length
+                ? h('div', { style: C.projMeta }, '交付物：' + r.deliverables.join('；')) : null,
+              r.status === 'submitted'
+                ? h('div', { style: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
+                    h('button', {
+                      type: 'button', style: C.btn, 'data-action': 'accept-receipt', 'data-for': r.id,
+                      disabled: !!rcBusy, onClick: () => submitReceiptAction(r, 'accepted'),
+                    }, rcBusy === r.id ? '处理中…' : '接受'),
+                    h('button', {
+                      type: 'button', style: C.pickBtn, 'data-action': 'reject-receipt', 'data-for': r.id,
+                      disabled: !!rcBusy, onClick: () => submitReceiptAction(r, 'rejected'),
+                    }, rcBusy === r.id ? '处理中…' : '拒绝'))
+                : null,
+            )
+            return h('div', null,
+              h('div', { style: C.groupHead }, '9 · 任务回执 · 待裁定 ' + pending.length + ' / 已裁定 ' + decided.length),
+              rcMsg ? h('div', { style: rcMsg.ok ? C.ok : C.err, role: 'status', 'data-receipt-msg': '1' }, rcMsg.text) : null,
+              pending.length ? pending.map(rcRow)
+                : h('div', { style: C.empty }, '没有待裁定的回执。分支提交成果后，会在这里等你接受或拒绝。'),
+              decided.length
+                ? h('details', { style: { marginTop: '6px' } },
+                    h('summary', { style: C.taskSummary }, '展开查看 ' + decided.length + ' 条已裁定回执'),
+                    decided.map(rcRow))
+                : null,
+            )
+          })()
+        ),
+        // 0.21 done_when：任务侧完成候选提示 + primary 人工一键收敛（不自动宣布项目完成）。
+        (dd.completion_candidate && dd.completion_candidate.applicable && dd.completion_candidate.candidate)
+          ? h('div', { style: C.detailFull, 'data-section': 'completion', 'data-completion-candidate': '1' },
+              h('div', { style: C.statCard, 'data-completion-msg': '1' },
+                h('div', { style: C.groupHead }, '项目完成候选'),
+                h('div', { style: { fontSize: '12px', lineHeight: '1.6', margin: '4px 0' } },
+                  '所有任务已完成，等待项目最终确认。系统只提示候选，不自动把项目标为完成。'),
+                h('div', { style: C.projMeta }, '已接受 ' + (dd.completion_candidate.counts.accepted || 0) + ' / ' + (dd.completion_candidate.counts.total || 0) + ' 个任务'),
+                Array.isArray(dd.completion_candidate.done_when) && dd.completion_candidate.done_when.length
+                  ? h('div', { style: C.projMeta }, '完成条件（请逐条核对）：' + dd.completion_candidate.done_when.join('；')) : null,
+                h('button', {
+                  type: 'button', style: C.btn, 'data-action': 'converge-project',
+                  disabled: cvBusy, onClick: () => convergeProject(p, dd.completion_candidate),
+                }, cvBusy ? '处理中…' : '确认完成并收敛项目'),
+              ))
+          : null,
+      )
       })() : null }
 
       return h('div', { style: C.wrap, 'data-project-lite': 'panel', 'data-meta-state': data.metaState },
@@ -1697,6 +1810,8 @@ const API_STATE = 'api/project/state'
     function LinkOverlay() {
       const [req, setReq] = useState(linkRequest.get())
       const [rows, setRows] = useState(null)
+      const [linkedIds, setLinkedIds] = useState([])   // 0.21 A：本会话已关联的项目 id（避免重复关联 + 显示当前角色）
+      const [roleByPid, setRoleByPid] = useState({})   // 每个项目的角色选择（默认智能推荐）
       const [err, setErr] = useState(null)
       const [done, setDone] = useState(null)
       const [busy, setBusy] = useState(false)
@@ -1706,36 +1821,49 @@ const API_STATE = 'api/project/state'
       useEffect(() => {
         if (!req) return undefined
         let alive = true
-        fetch(API_OVERVIEW, { cache: 'no-store' })
-          .then((res) => res.json())
-          .then((json) => {
-            if (!alive) return
-            if (json && json.ok) {
-              const items = []
-              for (const g of (json.groups || [])) for (const p of (g.items || [])) items.push(p)
-              setRows(items); setErr(null)
-            } else {
-              setRows(null); setErr('读不到项目列表')
-            }
-          })
-          .catch((e) => { if (alive) { setRows(null); setErr(String(e && e.message ? e.message : e)) } })
+        // 项目列表 + 本会话现有归属，两路并拉。
+        Promise.all([
+          fetch(API_OVERVIEW, { cache: 'no-store' }).then((r) => r.json()),
+          fetch(API_LINKS_OF_SESSION + '?session_id=' + encodeURIComponent(req.sessionId), { cache: 'no-store' }).then((r) => r.json()).catch(() => null),
+        ]).then(([json, lj]) => {
+          if (!alive) return
+          if (json && json.ok) {
+            const items = []
+            for (const g of (json.groups || [])) for (const p of (g.items || [])) items.push(p)
+            setRows(items)
+            // 智能默认：项目无 active primary → primary；有 → supporting（外审 A）。
+            const defaults = {}
+            for (const p of items) defaults[p.id] = (p.primary_count || 0) === 0 ? 'primary' : 'supporting'
+            setRoleByPid(defaults)
+            setErr(null)
+          } else {
+            setRows(null); setErr('读不到项目列表')
+          }
+          const links = lj && lj.ok && Array.isArray(lj.links) ? lj.links : []
+          setLinkedIds(links.filter((l) => l && l.unlinked !== true).map((l) => l.project_id))
+        }).catch((e) => { if (alive) { setRows(null); setErr(String(e && e.message ? e.message : e)) } })
         return () => { alive = false }
       }, [req])
 
       if (!req) return null
-      const close = () => { linkRequest.set(null); setDone(null); setErr(null); setRows(null) }
+      const close = () => { linkRequest.set(null); setDone(null); setErr(null); setRows(null); setLinkedIds([]); setRoleByPid({}) }
       const link = async (p) => {
+        const role = roleByPid[p.id] || ((p.primary_count || 0) === 0 ? 'primary' : 'supporting')
         setBusy(true); setErr(null); setDone(null)
         try {
           const res = await fetch(API_LINK, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ requestId: newRequestId(), project_id: p.id, session_id: req.sessionId, basis: '会话右键关联' }),
+            body: JSON.stringify({
+              requestId: newRequestId(), project_id: p.id, session_id: req.sessionId,
+              role, basis: '会话右键关联（智能默认 ' + role + '，可手动覆盖）',
+            }),
           })
           let json = null
           try { json = await res.json() } catch (e) { json = null }
           if (json && json.ok) {
-            setDone((json.changed ? '已加入：' : '本来就在里面，零副作用：') + (p.name || p.id))
+            setDone((json.changed ? '已加入：' : '本来就在里面，零副作用：') + (p.name || p.id) + '（角色 ' + role + '）')
+            if (json.changed !== false) setLinkedIds((prev) => prev.concat([p.id]))
           } else {
             const er = json && json.error
             setErr((er && (er.message || er.code)) || ('HTTP ' + res.status))
@@ -1758,16 +1886,72 @@ const API_STATE = 'api/project/state'
             ? h('div', { style: C.empty }, '读取项目列表…')
             : rows.length === 0
               ? h('div', { style: C.empty }, '还没有项目。先到侧栏「项目」里建一个。')
-              : rows.map((p) => h('div', { key: 'op' + p.id, style: C.proj, 'data-overlay-project': p.id },
-                  h('div', { style: C.projName }, p.name || p.id),
-                  h('div', { style: C.projMeta }, p.next_action || '—'),
-                  h('button', {
-                    type: 'button',
-                    style: C.pickBtn,
-                    disabled: busy,
-                    'data-action': 'overlay-link',
-                    onClick: () => link(p),
-                  }, '加入'),
+              : rows.map((p) => {
+                  const already = linkedIds.indexOf(p.id) >= 0
+                  const role = roleByPid[p.id] || ((p.primary_count || 0) === 0 ? 'primary' : 'supporting')
+                  return h('div', { key: 'op' + p.id, style: C.proj, 'data-overlay-project': p.id },
+                    h('div', { style: C.projName }, p.name || p.id),
+                    h('div', { style: C.projMeta }, (p.primary_count || 0) === 0 ? '尚无主会话 · 默认设为主' : '已有主会话 · 默认设为辅助'),
+                    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', marginTop: '6px' } },
+                      h('select', {
+                        style: C.input, value: role, 'data-overlay-role': p.id, disabled: busy || already,
+                        onChange: (e) => setRoleByPid((prev) => Object.assign({}, prev, { [p.id]: (e && e.target && e.target.value === 'supporting') ? 'supporting' : 'primary' })),
+                      },
+                        h('option', { value: 'primary' }, '主会话 primary'),
+                        h('option', { value: 'supporting' }, '辅助会话 supporting')),
+                      h('button', {
+                        type: 'button', style: C.pickBtn, disabled: busy || already,
+                        'data-action': 'overlay-link',
+                        onClick: () => link(p),
+                      }, already ? '已加入' : '加入'),
+                    ),
+                  )
+                }),
+          h('button', { type: 'button', style: C.btn, onClick: close }, '关闭'),
+        ))
+    }
+
+    /**
+     * 0.21 共享收件箱：会话右键「查看我的待办」打开的浮层。
+     * 只读 API_INBOX（按 session_id 列派给当前会话的待办任务），读现有任务记录，不另建权威。
+     */
+    function InboxOverlay() {
+      const [req, setReq] = useState(inboxRequest.get())
+      const [rows, setRows] = useState(null)
+      const [err, setErr] = useState(null)
+
+      useEffect(() => inboxRequest.subscribe(setReq), [])
+      useEffect(() => {
+        if (!req) return undefined
+        let alive = true
+        fetch(API_INBOX + '?session_id=' + encodeURIComponent(req.sessionId), { cache: 'no-store' })
+          .then((r) => r.json())
+          .then((json) => {
+            if (!alive) return
+            if (json && json.ok) { setRows(Array.isArray(json.tasks) ? json.tasks : []); setErr(null) }
+            else { setRows(null); setErr((json && json.error && (json.error.message || json.error.code)) || '读不到待办') }
+          })
+          .catch((e) => { if (alive) { setRows(null); setErr(String(e && e.message ? e.message : e)) } })
+        return () => { alive = false }
+      }, [req])
+
+      if (!req) return null
+      const close = () => { inboxRequest.set(null); setRows(null); setErr(null) }
+      return h('div', { style: C.overlayMask, 'data-inbox-overlay': '1' },
+        h('div', { style: C.overlayBox },
+          h('div', { style: C.formTitle }, '我的待办任务'),
+          h('div', { style: C.muted }, req.displayTitle || req.sessionId),
+          err ? h('div', { style: C.err, role: 'alert', 'data-inbox-error': '1' }, '失败：' + err) : null,
+          rows === null
+            ? h('div', { style: C.empty }, '读取待办…')
+            : rows.length === 0
+              ? h('div', { style: C.empty }, '当前没有派给你的待办任务。')
+              : rows.map((t) => h('div', { key: t.id, style: C.proj, 'data-inbox-task': t.id },
+                  h('div', { style: C.projName }, (t.source_id ? t.source_id + ' · ' : '') + (t.title || t.id)),
+                  h('div', { style: C.projMeta }, '目标：' + (t.objective || '—')),
+                  Array.isArray(t.acceptance_criteria) && t.acceptance_criteria.length
+                    ? h('div', { style: C.projMeta }, '验收：' + t.acceptance_criteria.join('；')) : null,
+                  h('div', { style: C.hint }, '在项目面板打开对话后，按目标执行，完成后用 task_receipt_submit 提交回执。'),
                 )),
           h('button', { type: 'button', style: C.btn, onClick: close }, '关闭'),
         ))
@@ -2014,6 +2198,10 @@ const API_STATE = 'api/project/state'
             id: 'project-lite-link',
             order: 300,
           }, LinkOverlay))
+          // 0.21：共享收件箱浮层。
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay', id: 'project-lite-inbox', order: 305,
+          }, InboxOverlay))
         } catch (e) { /* 没有 shell.overlay 就只保留面板侧入口 */ }
 
         // 0.14：工作区右键「加入项目…」的浮层 + 菜单入口。
@@ -2095,7 +2283,7 @@ const API_STATE = 'api/project/state'
                 resolve: (target) => {
                   const sessionId = target && target.sessionId
                   if (!sessionId) return []
-                  return [{
+                  const entry = {
                     id: 'project-lite.add-to-project',
                     label: '加入项目…',
                     run: () => {
@@ -2104,7 +2292,16 @@ const API_STATE = 'api/project/state'
                         displayTitle: (target && target.displayTitle) || sessionId,
                       })
                     },
-                  }]
+                  }
+                  // 0.21：共享收件箱——减少「不知道自己有什么任务」的负担。
+                  const inbox = {
+                    id: 'project-lite.inbox',
+                    label: '查看我的待办',
+                    run: () => {
+                      inboxRequest.set({ sessionId, displayTitle: (target && target.displayTitle) || sessionId })
+                    },
+                  }
+                  return [entry, inbox]
                 },
               }), 'project-lite: session menu')
             })

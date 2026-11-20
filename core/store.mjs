@@ -834,6 +834,54 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
     },
 
     /**
+     * 0.21 受控项目更新：只允许改 status / next_action 两个字段（字段白名单，其余一概忽略并拒绝）。
+     * 只服务「任务全 accepted 后的人工收敛」——系统只提示完成候选，最终状态由 primary 点按钮或 Agent
+     * 在拿到人确认后调用本方法。权限走 withOp 标准 authorizeWrite（project_id 在 args 里，单 primary）。
+     * 安全边界：
+     *   1. status 只允许 active/paused/done；archived/deleted 必须走 archiveProject/deleteProject 专属路由，不许绕过。
+     *   2. 必须给 expected_rev 且等于当前 rev（CAS），杜绝覆盖并发更新。
+     *   3. next_action 过 validateNextAction（非态度词），与建项目同口径。
+     *   4. 至少一个字段真变化，否则 changed=false 零副作用（幂等）。
+     */
+    async updateProject({ project_id, id, status, next_action, expected_rev, client_request_id } = {}) {
+      assertWritable()
+      const pid = project_id || id
+      if (!pid) throw new StoreError('PROJECT_ID_REQUIRED', 'project_id 必填')
+      const before = dview.table('project').get(pid)
+      if (!before) throw new StoreError('PROJECT_NOT_FOUND', '项目不存在：' + pid)
+      if (before.status === 'deleted') throw new StoreError('PROJECT_DELETED', '回收站项目不可更新：' + pid)
+      // 字段白名单：出现任何不允许的字段（除白名单元数据）直接拒绝，防止通用写工具扩大权限。
+      const allowed = ['project_id', 'id', 'status', 'next_action', 'expected_rev', 'client_request_id', 'manual']
+      const extra = Object.keys(arguments[0] || {}).filter((k) => !allowed.includes(k))
+      if (extra.length) throw new StoreError('FIELD_NOT_ALLOWED', 'updateProject 只允许 status / next_action，收到非法字段：' + extra.join(','))
+      if (expected_rev === undefined) throw new StoreError('EXPECTED_REV_REQUIRED', '项目状态更新必须带 expected_rev（CAS 防覆盖）', { id: pid, actual_rev: before.rev })
+      if (Number(expected_rev) !== before.rev) throw new StoreError('REV_CONFLICT', '项目 rev 冲突：expected ' + expected_rev + ' actual ' + before.rev)
+      const next = { ...before }
+      let changed = false
+      if (status !== undefined) {
+        if (!['active', 'paused', 'done'].includes(status)) throw new StoreError('INVALID_STATUS', 'status 只允许 active/paused/done；archived/deleted 走专属路由', { got: status })
+        if (status !== before.status) { next.status = status; changed = true }
+      }
+      if (next_action !== undefined) {
+        const v = validateNextAction(next_action)
+        if (!v.ok) throw new StoreError(v.code, 'next_action 不合法：' + v.reason)
+        if (v.value !== before.next_action) { next.next_action = v.value; changed = true }
+      }
+      if (!changed) return { project: before, changed: false, client_request_id: client_request_id || null }
+      next.updated_at = nowIso()
+      next.updated_by = actor
+      next.rev = before.rev + 1
+      assertRecord('project', next)
+      await putJ('project', pid, next)
+      const parts = []
+      if (next.status !== before.status) parts.push('status ' + before.status + '→' + next.status)
+      if (next.next_action !== before.next_action) parts.push('next_action 更新')
+      await writeLog('update', 'project', pid, '受控更新：' + parts.join('；'), before.rev, next.rev)
+      await refreshBaseline()
+      return { project: next, changed: true, client_request_id: client_request_id || null }
+    },
+
+    /**
      * 归档：只改一条 project 记录，不动任何子记录。
      *
      * R-04：这里以前无条件是“读当前 → 写 archived”，重复归档会把 rev 一路推高（并发下更明显）。
@@ -1442,7 +1490,7 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
   })
 
   // S1-A：所有写入口统一走 journal。嵌套写自动合并成同一个操作（createProject → linkSession）。
-  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime', 'proposeCheckpoint', 'confirmCheckpoint', 'rejectCheckpoint', 'createTask', 'assignTask', 'submitTaskReceipt', 'decideTaskReceipt']
+  const JOURNALED = ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'importRecord', 'transferPrimary', 'attributeTask', 'setTaskSourceTime', 'proposeCheckpoint', 'confirmCheckpoint', 'rejectCheckpoint', 'createTask', 'assignTask', 'submitTaskReceipt', 'decideTaskReceipt', 'updateProject']
   for (const name of JOURNALED) {
     const impl = store[name]
     if (typeof impl !== 'function') continue
@@ -1534,7 +1582,7 @@ export async function openStoreReadOnly({ root, writer = 'dsh-project-core@0.1.0
     },
     _writeRefused(op) { throw new StoreError('READONLY_MODE', '只读打开：拒绝写操作 ' + op) },
   }
-  for (const op of ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable']) {
+  for (const op of ['createProject', 'linkSession', 'archiveProject', 'restoreProject', 'unlinkSession', 'linkWorkspace', 'unlinkWorkspace', 'deleteProject', 'addDeliverable', 'unlinkDeliverable', 'updateProject']) {
     readonly[op] = async () => readonly._writeRefused(op)
   }
   return readonly

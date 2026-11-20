@@ -16,7 +16,7 @@
 
 import { resolveHostSessionId, runAsCaller } from './identity.mjs'
 
-const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide']
+const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide', 'project_update']
 
 /**
  * 唯一身份来源：宿主 exec。写入类工具一律包在 runAsCaller 里，
@@ -327,6 +327,48 @@ export function registerAgentTools(ctx, deps) {
         const code = e && e.code ? e.code : 'CREATE_FAILED'
         return { ok: false, error: code, message: String(e && e.message ? e.message : e) }
       }
+    },
+  })
+
+  // ---- 0.21 受控写：更新项目状态/下一步（任务全 accepted 后的人工收敛入口）----
+  reg({
+    name: 'project_update',
+    description: '受控更新项目状态与下一步（只有 primary 能调）。仅允许两个字段：status（active/paused/done）和 next_action（可执行动作）。用于任务全部 accepted 后、经人确认把项目收敛到 done 并更新下一步；系统不会因任务 accepted 自动把项目标记完成。字段白名单 + 单 primary 权限 + CAS 并发保护 + 状态枚举校验；archived/deleted 须走面板归档/删除，不接受本工具。调用前应取得使用者确认。',
+    parameters: {
+      project_id: { type: 'string', description: '项目 id（prj_…）' },
+      status: { type: 'string', description: '可选：active / paused / done（不含 archived/deleted）' },
+      next_action: { type: 'string', description: '可选：更新后的可执行下一步' },
+      expected_rev: { type: 'number', description: '可选：乐观并发 rev；省略则取当前值' },
+      requestId: { type: 'string', description: '可选幂等 id' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.project_id) return { ok: false, error: 'PROJECT_ID_REQUIRED' }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份，拒绝更新' }
+      if (args.status === undefined && args.next_action === undefined) return { ok: false, error: 'NO_FIELDS', message: '至少要给 status 或 next_action 之一' }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
+      try {
+        // 减负：expected_rev 省略时内部取当前 rev（单实例 journal 串行化，无真实并发窗）。
+        // 给了就用给的——调用方若持有旧 rev，store 的 CAS 仍会拒绝，不放松保护。
+        let rev = args.expected_rev
+        if (rev === undefined) {
+          const cur = typeof s.project === 'function' ? s.project(args.project_id) : null
+          if (!cur) return { ok: false, error: 'PROJECT_NOT_FOUND', message: '项目不存在：' + args.project_id }
+          rev = cur.rev
+        }
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:project-update' }, () =>
+          s.updateProject({
+            project_id: args.project_id, status: args.status, next_action: args.next_action,
+            expected_rev: rev, client_request_id: args.requestId,
+          }))
+        if (evidence) evidence({ phase: 'tool-project-update', id: args.project_id, status: args.status, changed: r.changed })
+        return { ok: true, project: r.project ? { id: r.project.id, status: r.project.status, next_action: r.project.next_action, rev: r.project.rev } : null, changed: r.changed }
+      } catch (e) { return { ok: false, error: e && e.code ? e.code : 'UPDATE_FAILED', message: String(e && e.message ? e.message : e) } }
     },
   })
 
