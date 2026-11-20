@@ -46,6 +46,15 @@ push('T5', r4.suggested_session_title.includes('T-0099'), '有关联任务时带
 // T6 不写宿主：workspace.json 未被插件改（本测试没建 workspace.json，确认插件没造一个）
 import { existsSync } from 'node:fs'
 push('T6', !existsSync(join(ROOT,'workspace.json')), '插件未写 workspace.json（不碰宿主数据）')
+// T7 英文专名按词边界不切半：项目名含 dsh-project-lite（16字符）应完整保留
+const pj2=(await as(P,()=>s2.createProject({name:'dsh-project-lite 开源发布',objective:'o',next_action:'验证英文短名',session_id:P}))).project
+const r5=await resume.execute({project_id:pj2.id},exec(P))
+push('T7', r5.suggested_session_title.includes('dsh-project-lite'), '英文专名不切半：'+r5.suggested_session_title)
+// T8 纯中文 ≤8 字
+const pj3=(await as(P,()=>s2.createProject({name:'一二三四五六七八九十十一',objective:'o',next_action:'验证中文短名',session_id:P}))).project
+const r6=await resume.execute({project_id:pj3.id},exec(P))
+const cn=(r6.suggested_session_title.match(/【主】(.+?) ·/)||[])[1]||''
+push('T8', [...cn].length<=8 && cn==='一二三四五六七八', '纯中文短名≤8字：'+cn)
 await s2.close()
 const pass=steps.filter(x=>x.ok).length
 const sum={at:new Date().toISOString(),suite:'s43-suggested-title',total:steps.length,pass,fail:steps.length-pass,verdict:pass===steps.length?'PASS':'FAIL',steps}

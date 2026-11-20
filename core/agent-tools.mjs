@@ -56,6 +56,25 @@ const textOutput = (value) => [{ type: 'text', text: JSON.stringify(value, null,
  * 只算不写：不碰宿主 workspace.json / projcache，不碰任何写闸。
  * 数据只取项目域已有事实：project.name / task.source_id / next_action / 会话关联 role。
  */
+/** 标题短名：纯中文按字取 8；英文/混合按 -_/空格 分段取到 16 字符且不切半词。 */
+function shortTitleName(raw) {
+  const s = String(raw ?? '').replace(/[【】·（）()]/g, '').trim()
+  if (!s) return '项目'
+  // 纯中文（无 ASCII 字母数字）：按码点取前 8 字。
+  if (!/[A-Za-z0-9]/.test(s)) return [...s].slice(0, 8).join('')
+  // 含英文/数字：按分隔符切成段，逐段累加，超 16 就停，不切半段。
+  const segs = s.split(/ +/).filter(Boolean)
+  let out = ''
+  for (const seg of segs) {
+    const next = out ? out + ' ' + seg : seg
+    if (next.length > 16) break
+    out = next
+  }
+  // 单段本身就 >16（如超长无分隔英文名）：硬截 16，避免整段丢弃。
+  if (!out && segs.length) out = segs[0].slice(0, 16)
+  return out || s.slice(0, 16)
+}
+
 function suggestedSessionTitle(store, projectId, sessionId) {
   const p = typeof store.project === 'function' ? store.project(projectId) : null
   if (!p) return null
@@ -63,11 +82,11 @@ function suggestedSessionTitle(store, projectId, sessionId) {
     .filter((l) => l && l.project_id === projectId && l.session_id === sessionId && l.unlinked !== true)
   const isPrimary = links.some((l) => l.role === 'primary')
   const role = isPrimary ? '主' : (links.some((l) => l.role === 'supporting') ? '执行' : '参考')
-  // 任务短名：优先该会话关联任务的 source_id 对应任务 title，否则项目名；≤8 汉字。
+  // 任务短名：优先该会话关联任务的 title，否则项目名；中文≤8字、英文按词边界≤16字符。
   const tasks = (typeof store.tasks === 'function' ? store.tasks() : []).filter((t) => t && t.project_id === projectId)
   const mine = tasks.find((t) => t.primary_session_id === sessionId || t.assigned_session_id === sessionId) || tasks[0]
   const rawShort = (mine && mine.title) || p.name || '项目'
-  const short = String(rawShort).replace(/[【】·（）()]/g, '').trim().slice(0, 8)
+  const short = shortTitleName(rawShort)
   // 当前工作：next_action 去态度词后取前 16 字；没有就用项目 objective 首句。
   let cur = ''
   const na = mine && mine.next_action ? String(mine.next_action) : (p.next_action ? String(p.next_action) : '')
