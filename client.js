@@ -1856,7 +1856,9 @@ const API_STATE = 'api/project/state'
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               requestId: newRequestId(), project_id: p.id, session_id: req.sessionId,
-              role, basis: '会话右键关联（智能默认 ' + role + '，可手动覆盖）',
+              // basis 必须固定：linkSession 用「确定性键+全字段比对」判幂等，动态文案会让
+              // 重复关联被误判为内容变化 → EXPECTED_REV_REQUIRED。智能默认只体现在 UI 文案与 role。
+              role, basis: '会话右键关联',
             }),
           })
           let json = null

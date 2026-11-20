@@ -31,13 +31,18 @@ push('T0', TOOL_NAMES.includes('project_update') && TOOL_NAMES.length === 12, 'T
 // 建项目 + 关联 primary + supporting
 const p = (await as(P, () => st.createProject({ name: '减负测试', objective: '验证七项', next_action: '派一个任务给分支', session_id: P }))).project
 // createProject 已自动把 P 关联为 primary（与 s42 同口径）；补一个 supporting 分支。
-await as(P, () => st.linkSession({ project_id: p.id, session_id: S, role: 'supporting', basis: '分支' }))
+await as(P, () => st.linkSession({ project_id: p.id, session_id: S, role: 'supporting', basis: '会话右键关联' }))
 
 // T1：overview 带 primary_count（A 右键智能默认数据源）
 const read = createReadService(st)
 const ov = read.overview()
 const psum = ov.groups.flatMap(g => g.items).find(x => x.id === p.id)
 push('T1', psum && psum.primary_count === 1, 'overview 项目带 primary_count=1（右键默认 supporting）')
+
+// T1b：会话右键回归——固定 basis 重复关联同一会话+项目 → changed=false，不因内容变化报错。
+// （动态 basis 会让 linkSession 判为内容变化 → EXPECTED_REV_REQUIRED，真机 2026-11-21 踩过。）
+const relink = await as(P, () => st.linkSession({ project_id: p.id, session_id: S, role: 'supporting', basis: '会话右键关联' }))
+push('T1b', relink.changed === false && relink.rev === 1, '固定 basis 重复关联 → changed=false 零副作用（防动态basis回归）')
 
 // T2：completionCandidate 初始为 false（有项目但无 accepted 任务）
 let cc = read.completionCandidate(p.id)

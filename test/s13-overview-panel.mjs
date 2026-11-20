@@ -196,6 +196,9 @@ push('D2', (src.match(/method\s*:\s*['"]POST['"]/g) || []).length === 16
   && src.includes("API_RECEIPT_DECIDE = 'api/project/receipt-decide'") && src.includes("API_PROJECT_UPDATE = 'api/project/update'"),
   '十二个写端点 / 十六处 POST 调用点（含工作区/交付物浮层 + 检查点确认/拒绝 + 0.21回执裁定/项目收敛）')
 push('D3', src.includes("const API_OVERVIEW = 'api/project/overview'"), 'overview 走只读 GET 相对路径')
+// 0.21 回归：会话右键 basis 必须是固定字面量（动态拼接会让重复关联被判内容变化 → EXPECTED_REV_REQUIRED）。
+push('D5', src.includes("basis: '会话右键关联',") && !/basis:\s*'会话右键关联[^']*'\s*\+/.test(src),
+  '会话右键关联 basis 为固定字面量（防动态basis导致重复关联报错）')
 push('D4', src.includes('const [ovData, setOvData]') && src.includes('const [ovError, setOvError]'), 'overview 用独立 state')
 
 const pass = steps.filter((s) => s.ok).length
