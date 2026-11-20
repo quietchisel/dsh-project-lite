@@ -799,12 +799,15 @@ export async function openStore({ root, facility: injectedFacility, actor = 's0-
           && existing.source === source
         if (sameFields && !existing.unlinked) return decorateLink(existing, false)
         /**
-         * 复活（0.12 契约）：解除过关联的记录，字段没变、只是被软标记了 →
-         * 重新关联必须能直接复活，不能因为"内容变了"就要 expected_rev。
-         * 界面拿不到 unlinked 记录的 rev（列表里看不到它），要求 rev 等于把复活这条路堵死。
-         * 只有**真的改内容**（角色/依据/来源变了）才要 expected_rev。
+         * 复活（0.12 契约）：unlinked 记录从界面消失、看不到 rev 与历史 basis/role。
+         * 所以「重新挂上来」这个动作本身一律视为复活——不管提交的角色/依据和旧记录是否相同，
+         * 都不要求 expected_rev（要求等于堵死复活路：界面无从得知那个 rev）。
+         * 2026-11-21 真机踩坑：历史记录 basis 是长文案且 role=primary、已 unlinked，前端用新 basis 复活成
+         * supporting，被旧逻辑 sameFields&&unlinked 判为内容变化 → EXPECTED_REV_REQUIRED。
+         * 边界：复活后用提交的新字段覆盖旧字段（角色/依据以本次为准），rev+1、清 unlinked、写 changelog；
+         * 之后记录重新可见，再改角色/依据仍须 expected_rev（下方活跃记录分支不变）。
          */
-        const reviveOnly = sameFields && existing.unlinked === true
+        const reviveOnly = existing.unlinked === true
         if (!reviveOnly && expected_rev === undefined) {
           throw new StoreError('EXPECTED_REV_REQUIRED', '同一确定性键的内容发生变化时必须提供 expected_rev（不允许无条件覆盖）', { id, actual_rev: existing.rev })
         }

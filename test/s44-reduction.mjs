@@ -44,6 +44,17 @@ push('T1', psum && psum.primary_count === 1, 'overview 项目带 primary_count=1
 const relink = await as(P, () => st.linkSession({ project_id: p.id, session_id: S, role: 'supporting', basis: '会话右键关联' }))
 push('T1b', relink.changed === false && relink.rev === 1, '固定 basis 重复关联 → changed=false 零副作用（防动态basis回归）')
 
+// T1c：真机回归——unlinked 记录（历史 basis/role 与提交不同）复活，不带 expected_rev 应成功。
+// 真机 2026-11-21：历史记录 basis='使用者授权关联…' role=primary unlinked=true，前端用新 basis 复活成 supporting 报错。
+const OTHER = 'session-30000000-0000-4000-8000-000000000003'
+await as(P, () => st.linkSession({ project_id: p.id, session_id: OTHER, role: 'supporting', basis: '历史长文案授权 2026-11-17' }))
+await as(P, () => st.unlinkSession({ project_id: p.id, session_id: OTHER, expected_rev: 1 }))
+let reviveErr = null, revived = null
+try { revived = await as(P, () => st.linkSession({ project_id: p.id, session_id: OTHER, role: 'supporting', basis: '会话右键关联' })) } catch (x) { reviveErr = x }
+const revivedRec = st.links().find((l) => l.session_id === OTHER && l.project_id === p.id)
+push('T1c', !reviveErr && revived && revived.changed === true && revivedRec && revivedRec.basis === '会话右键关联' && revivedRec.unlinked !== true,
+  'unlinked 记录用不同 basis 复活（不带rev）成功，basis 按本次提交 → ' + (reviveErr ? reviveErr.code : 'ok'))
+
 // T2：completionCandidate 初始为 false（有项目但无 accepted 任务）
 let cc = read.completionCandidate(p.id)
 push('T2', cc.applicable === true && cc.candidate === false && cc.counts.total === 0, '无任务时完成候选=false')
