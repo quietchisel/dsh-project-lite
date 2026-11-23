@@ -14,6 +14,7 @@
  * 这样 Node 层可用假 defineTool 测 execute 逻辑，真实 Host 传官方 defineTool。
  */
 
+import { randomUUID } from 'node:crypto'
 import { resolveHostSessionId, runAsCaller } from './identity.mjs'
 
 const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_dispatch_spawn', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide', 'project_update']
@@ -500,16 +501,28 @@ export function registerAgentTools(ctx, deps) {
       try {
         // 1) 建子分支。形状照抄宿主 dsh-tool-subagent/src/index.ts L317-333：
         //    provider/parent/prompt/label/delivery/signal，返回 {childId,name,dispose}。
+        // 0.22.1 真机修复：宿主默认 childId = randomUUID()（dsh-subagent/manager.ts:335 裸 UUID，
+        //   sessions.prepare:1244 原样用传入 id），不带 session- 前缀——既过不了本项目 store 的
+        //   ^session-[0-9a-f-]+$ schema，也过不了 resolveHostSessionId 正则（子 agent 交回执会
+        //   IDENTITY_UNAVAILABLE、source_session_id 对不上）。所以这里自带一个 session-<uuid> 的
+        //   childId 传进去：startActivation 的 spec.childId 路径（manager.ts:335/373-381）原样采用，
+        //   sessionIdSchema=z.string() 无额外格式约束，assertChildIdAvailable 只查重复——一处修好
+        //   "挂得上" 与 "回执对得上" 两个问题，且不触碰 store schema 这条全库完整性闸。
+        const mintedChildId = 'session-' + randomUUID()
         started = await sa.startActivation({
           provider: 'spawn',
           label: String(args.title).slice(0, 80),
           parent,
+          childId: mintedChildId,
           prompt: [{ type: 'text', text: String(args.prompt) }],
           delivery: 'parent',
           signal: exec.signal,
         })
         const childSid = started && started.childId
         if (!childSid) throw Object.assign(new Error('startActivation 未返回 childId'), { code: 'CHILD_ID_MISSING' })
+        // 宿主应原样返回我们传入的 mintedChildId；若不一致，拒绝继续——否则挂的 sid 与子 agent
+        // 实际 session.id 不符，会修出"挂得上但回执对不上"的半成品。
+        if (childSid !== mintedChildId) throw Object.assign(new Error('宿主返回的 childId 与请求不一致：' + childSid), { code: 'CHILD_ID_MISMATCH' })
         // 2) 挂成项目 supporting（primary 权威写，走宿主身份；失败即回滚子分支）
         await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch-spawn' }, () =>
           s.linkSession({ project_id: args.project_id, session_id: childSid, role: 'supporting', basis: '自动派活创建（task_dispatch_spawn）', confidence: 'confirmed' }))

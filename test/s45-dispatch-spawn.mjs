@@ -30,7 +30,8 @@ const fakeSubagents = {
   async startActivation(spec) {
     spawnCalls.push(spec)
     if (spawnMode === 'fail') throw Object.assign(new Error('provider down'), { code: 'PROVIDER_CHANGED' })
-    const childId = spawnMode === 'nochild' ? undefined : childSid(spawnCalls.length)
+    // 模拟宿主真实行为：spec.childId 若提供则原样采用（manager.ts:335/373-381），否则造裸 UUID
+    const childId = spawnMode === 'nochild' ? undefined : (spec.childId ?? childSid(spawnCalls.length))
     return {
       childId,
       name: 'agent-' + spawnCalls.length,
@@ -79,6 +80,13 @@ const t4child = r.child_session_id
 push('T4', r.ok === true && !!t4child && !!r.task?.id, 'primary 派活成功返回 child_session_id 与任务')
 push('T5', r.ok === true && r.task.assigned_session_id === t4child, '任务已派给子会话（assigned_session_id=child）')
 push('T6', spawnCalls.length === 1 && spawnCalls[0].provider === 'spawn' && spawnCalls[0].parent === execP.agent && spawnCalls[0].delivery === 'parent', 'startActivation 形状正确（provider/parent/delivery）')
+
+// T6b：0.22.1 真机修复——传入的 childId 带 session- 前缀、满足 store schema，且宿主原样回显
+const passedChildId = spawnCalls[0].childId
+push('T6b', /^session-[0-9a-f-]+$/.test(passedChildId) && passedChildId === t4child, 'childId 满足 ^session-[0-9a-f-]+$ 且宿主原样回显（' + passedChildId + '）')
+// T6c：回执对得上——子 agent 用该 sid 提交回执时 resolveHostSessionId 正则能过（IDENTITY_UNAVAILABLE 不出现）
+const subCheck = await submitReceipt.execute({ project_id: pid, task_id: r.task.id, summary: '格式验证', result: 'completed' }, { agent: { session: { id: passedChildId }, id: passedChildId }, signal: undefined })
+push('T6c', subCheck.ok === true, '子 agent 用归一化 sid 提交回执成功（source_session_id 对得上）')
 
 // T7：挂关联——子会话确认为项目 supporting
 const linksOf = registered.get('project_links_of_session')

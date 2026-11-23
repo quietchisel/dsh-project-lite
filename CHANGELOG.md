@@ -19,6 +19,12 @@
 - **测试**：新增 s45-dispatch-spawn（10/10：注册/缺参/越权回滚/成功链/派单/startActivation 形状/挂 supporting/spawn 抛错/无 childId 回滚/structured_result）；s44 T0 工具计数 12→13；三个测试脚本追加 s45。全量 test:full 38 套全绿。
 - **状态**：`Implemented`，非 `Verified`——Host 半（agent-tools.mjs/index.js）改动需使用者重启 DSH 才生效；真机验证清单见实施报告。未推远端、未建 Release、未改正式数据域与台账。
 
+### 修订（真机验证失败后的 childId 格式修复）
+
+- **问题**：使用者重启后主对话实调 `task_dispatch_spawn` 返回 `RECORD_INVALID`——宿主 `startActivation` 默认 childId 是裸 UUID（`dsh-subagent/manager.ts:335` `randomUUID()`，`sessions.prepare:1244` 原样使用，不带 `session-` 前缀），过不了本项目 store 的 `^session-[0-9a-f-]+$` schema；且子 agent 交回执时 `resolveHostSessionId` 正则也拒裸 UUID（source_session_id 对不上）。`dispose` 回滚生效、无孤儿。
+- **修复**：`task_dispatch_spawn` 在 `startActivation` 时自带 `childId:'session-'+randomUUID()`（spec.childId 路径原样采用、`sessionIdSchema=z.string()` 无格式约束、只查重复），从源头让子会话 id 带前缀——一处解决"挂得上"与"回执对得上"，不放宽 store schema。宿主返回 childId 与请求不一致时拒绝继续（CHILD_ID_MISMATCH），杜绝半成品。
+- **测试**：s45 加 T6b（childId 满足正则且原样回显）、T6c（子 agent 用该 sid 提交回执成功），10→12/12；全量 test:full 38 套仍全绿。仍在 v0.22.0 内，不跨档跳版本。
+
 ## [0.21.0] - 2026-11-21
 
 ### 新增（减负改造第一批 A-D + 第二批三件）
