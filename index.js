@@ -249,11 +249,15 @@ export function apply(ctx, config = {}) {
   let disposeTools = null
   try {
     const toolsSvc = typeof ctx.get === 'function' ? ctx.get('tools') : null
+    // 0.22 P0-1：subagents 走软探测（与 sessionQuery 同口径），拿不到也不影响 panel/其余工具激活。
+    // 不写进 inject 硬依赖——没有 subagent 服务的 profile 装本插件仍要能跑面板。
+    const subagentsSvc = typeof ctx.get === 'function' ? ctx.get('subagents') : null
     if (toolsSvc && typeof toolsSvc.register === 'function') {
       loadDefineTool().then(({ defineTool, source, notes }) => {
         disposeTools = registerAgentTools(ctx, {
           defineTool,
           tools: toolsSvc,
+          subagents: subagentsSvc,
           getStore,
           readService: createReadService,
           titlesOf: registry.titlesOf,

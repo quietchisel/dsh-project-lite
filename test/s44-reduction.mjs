@@ -26,7 +26,7 @@ const ROOT = join(BASE, 'store'); await mkdir(ROOT, { recursive: true })
 const st = await openStore({ root: ROOT, actor: 's44' })
 
 // T0：工具已注册
-push('T0', TOOL_NAMES.includes('project_update') && TOOL_NAMES.length === 12, 'TOOL_NAMES 含 project_update，共 12 个工具')
+push('T0', TOOL_NAMES.includes('project_update') && TOOL_NAMES.includes('task_dispatch_spawn') && TOOL_NAMES.length === 13, 'TOOL_NAMES 含 project_update/task_dispatch_spawn，共 13 个工具')
 
 // 建项目 + 关联 primary + supporting
 const p = (await as(P, () => st.createProject({ name: '减负测试', objective: '验证七项', next_action: '派一个任务给分支', session_id: P }))).project

@@ -8,6 +8,17 @@
 
 （暂无）
 
+## [0.22.0] - 2026-11-23
+
+### 新增（痛点①落地 P0-1/P0-2：主对话一键派活给新分支）
+
+依据 `_会话/20261123-派活自动化调研/方案.md` §四 P0 立项。第一步探路的静态证实见 `_会话/20261123-派活自动化落地/探路结论.md`（宿主 `exec.agent` 即活实例、`agents.get(id)===exec.agent` 静态闭环成立）。
+
+- **P0-1 `task_dispatch_spawn` 工具**：主对话一句话派活给全新分支——一次调用完成 `spawn（ctx.subagents.startActivation，parent=exec.agent）→ linkSession（自动挂 supporting）→ createTask + assignTask（派给该子会话）`，免除"手动开对话→聊一轮→挂项目→指出是哪个会话"四步。parent 用宿主注入的活 `exec.agent`（不伪造，静态证实过宿主校验 `get(id)===parent`）；`subagents` 走软探测（`ctx.get`，不写进硬 inject，无该服务的 profile 仍只跑面板）；任一步失败自动 `dispose()` 子 agent 回滚、不留孤儿；写路径全复用现有 store 服务与授权闸（primary-only、assignTask 校验 supporting），未放宽任何权限。
+- **P0-2 回执与完成通知对齐**：`task_receipt_submit` 返回新增 `structured_result`（source_session_id=分支 sid + task_id），primary 可据此定位该分支的宿主完成通知与回执 summary 交叉核对；`task_receipt_decide` 描述提示"两者一致再接受"。仅加指针与提示，不改回执状态机。
+- **测试**：新增 s45-dispatch-spawn（10/10：注册/缺参/越权回滚/成功链/派单/startActivation 形状/挂 supporting/spawn 抛错/无 childId 回滚/structured_result）；s44 T0 工具计数 12→13；三个测试脚本追加 s45。全量 test:full 38 套全绿。
+- **状态**：`Implemented`，非 `Verified`——Host 半（agent-tools.mjs/index.js）改动需使用者重启 DSH 才生效；真机验证清单见实施报告。未推远端、未建 Release、未改正式数据域与台账。
+
 ## [0.21.0] - 2026-11-21
 
 ### 新增（减负改造第一批 A-D + 第二批三件）

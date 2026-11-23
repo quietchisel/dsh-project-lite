@@ -16,7 +16,7 @@
 
 import { resolveHostSessionId, runAsCaller } from './identity.mjs'
 
-const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide', 'project_update']
+const TOOL_NAMES = ['project_list', 'project_get', 'project_links_of_session', 'project_link_session', 'project_create', 'project_resume', 'propose_checkpoint', 'task_dispatch', 'task_dispatch_spawn', 'task_receipts', 'task_receipt_submit', 'task_receipt_decide', 'project_update']
 
 /**
  * 唯一身份来源：宿主 exec。写入类工具一律包在 runAsCaller 里，
@@ -108,7 +108,7 @@ function suggestedSessionTitle(store, projectId, sessionId) {
  * @returns 一个 dispose 函数（撤销注册）
  */
 export function registerAgentTools(ctx, deps) {
-  const { defineTool, getStore, readService, evidence, tools } = deps
+  const { defineTool, getStore, readService, evidence, tools, subagents } = deps
   const disposers = []
   const toolSvc = tools || (ctx && ctx.tools)
 
@@ -459,6 +459,91 @@ export function registerAgentTools(ctx, deps) {
     },
   })
 
+  // ---- 0.22 P0-1 受控写：自动建分支 + 挂 supporting 关联 + 派单（一步闭环）----
+  // 主对话调一次，免除「手动开对话→聊一轮→挂 supporting→指出会话」四步。
+  // 关键不变量：
+  //   1. 不改 task_dispatch 语义；本工具单独编排，写工具依旧不该偷偷起 agent——但它就是"派活给新分支"这个明确意图本身。
+  //   2. parent 必须是宿主注入的 exec.agent（活实例）；静态证实见 _会话/20261123-派活自动化落地/探路结论.md §三。
+  //   3. 任一步失败都要 dispose() 子 agent，绝不留孤儿分支。
+  //   4. subagents 是软依赖：拿不到服务就返回 SUBAGENTS_UNAVAILABLE，绝不让没有该服务的 profile 整个插件不激活。
+  reg({
+    name: 'task_dispatch_spawn',
+    description: '建一个子 agent 分支并立即给本项目派单（受控写，只有 primary 能调）。主对话一句话派活给全新分支：自动 spawn 一个本地 subagent、把它挂成项目 supporting 会话、建任务派给它——免除手动开新对话、聊一轮、手动挂项目、指出是哪个会话四步。子 agent 的完成通知由宿主自动送回主对话；分支用 task_receipt_submit 交回执、primary 用 task_receipt_decide 裁定。身份只来自宿主会话；subagents 服务不可用或调用方非 primary 时拒绝。失败会回滚已建分支，不留孤儿。只有使用者明确要求「派活给新分支」时才调。',
+    parameters: {
+      project_id: { type: 'string', description: '项目 id（prj_…）' },
+      title: { type: 'string', description: '任务标题' },
+      objective: { type: 'string', description: '任务目标：这一支要产出什么' },
+      prompt: { type: 'string', description: '发给子 agent 的首条任务指令（自包含：目标/边界/交付物/回执要求）' },
+      acceptance_criteria: { type: 'array', description: '可选：完成判据列表' },
+      note: { type: 'string', description: '可选：备注' },
+      requestId: { type: 'string', description: '可选幂等 id（同一意图重试不建两个任务）' },
+    },
+    output: { schema: { type: 'object' }, render: (_a, v) => textOutput(v) },
+    async execute(args, exec) {
+      if (exec && exec.signal && exec.signal.aborted) return { ok: false, error: 'ABORTED', message: '调用已取消' }
+      const spoof = spoofedArgKey(args)
+      if (spoof) return { ok: false, error: 'ACTOR_SPOOF_REJECTED', message: '不接受身份字段：' + spoof }
+      if (!args || !args.project_id || !args.title || !args.objective || !args.prompt) {
+        return { ok: false, error: 'REQUIRED_FIELDS', message: 'project_id / title / objective / prompt 必填' }
+      }
+      const hostSid = callerSid(exec)
+      if (!hostSid) return { ok: false, error: 'IDENTITY_UNAVAILABLE', message: '拿不到宿主会话身份，拒绝派活' }
+      const parent = exec && exec.agent
+      if (!parent) return { ok: false, error: 'PARENT_UNAVAILABLE', message: '拿不到宿主 agent（exec.agent），无法建子分支' }
+      const sa = subagents || (typeof ctx.get === 'function' ? ctx.get('subagents') : null)
+      if (!sa || typeof sa.startActivation !== 'function') {
+        return { ok: false, error: 'SUBAGENTS_UNAVAILABLE', message: '本机 profile 未挂载 subagents 服务，无法建分支；请手动派单给已有 supporting 会话' }
+      }
+      const s = await getStore()
+      if (!s.writable) return { ok: false, error: 'READONLY_DEGRADED', message: '项目域只读降级，拒绝写入' }
+      let started = null
+      try {
+        // 1) 建子分支。形状照抄宿主 dsh-tool-subagent/src/index.ts L317-333：
+        //    provider/parent/prompt/label/delivery/signal，返回 {childId,name,dispose}。
+        started = await sa.startActivation({
+          provider: 'spawn',
+          label: String(args.title).slice(0, 80),
+          parent,
+          prompt: [{ type: 'text', text: String(args.prompt) }],
+          delivery: 'parent',
+          signal: exec.signal,
+        })
+        const childSid = started && started.childId
+        if (!childSid) throw Object.assign(new Error('startActivation 未返回 childId'), { code: 'CHILD_ID_MISSING' })
+        // 2) 挂成项目 supporting（primary 权威写，走宿主身份；失败即回滚子分支）
+        await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch-spawn' }, () =>
+          s.linkSession({ project_id: args.project_id, session_id: childSid, role: 'supporting', basis: '自动派活创建（task_dispatch_spawn）', confidence: 'confirmed' }))
+        // 3) 建任务并派给该子会话（createTask/assignTask 内部各自反查 project_id 走授权，见 T-0036）
+        const r = await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch-spawn' }, () => s.createTask({
+          project_id: args.project_id, title: args.title, objective: args.objective,
+          assigned_session_id: childSid, acceptance_criteria: args.acceptance_criteria,
+          note: args.note, client_request_id: args.requestId,
+        }))
+        await runAsCaller({ sessionId: hostSid, source: 'tool:dispatch-spawn' }, () =>
+          s.assignTask({ task_id: r.task.id, assigned_session_id: childSid }))
+        if (evidence) evidence({ phase: 'tool-task-dispatch-spawn', id: r.task && r.task.id, child: childSid, project: args.project_id })
+        return {
+          ok: true,
+          child_session_id: childSid,
+          task: await s.task(r.task.id),
+          message: '已建子分支、挂为 supporting 并派单；子 agent 完成后会自动把结果送回本会话',
+        }
+      } catch (e) {
+        // 回滚：已 spawn 但后续任一步失败 → dispose 子 agent，绝不留孤儿
+        let rolledBack = false
+        if (started && typeof started.dispose === 'function') {
+          try { await started.dispose(); rolledBack = true } catch (_) { rolledBack = false }
+        }
+        return {
+          ok: false,
+          error: e && e.code ? e.code : 'DISPATCH_SPAWN_FAILED',
+          message: String(e && e.message ? e.message : e),
+          rolled_back: rolledBack,
+        }
+      }
+    },
+  })
+
   // ---- 0.19 只读：查任务回执 ----
   reg({
     name: 'task_receipts',
@@ -508,7 +593,15 @@ export function registerAgentTools(ctx, deps) {
           client_request_id: args.requestId,
         }))
         if (evidence) evidence({ phase: 'tool-receipt-submit', id: r.receipt.id, task: args.task_id })
-        return { ok: true, receipt: r.receipt, message: '回执已提交（submitted），待 primary 裁定；不自动完成任务' }
+        // 0.22 P0-2：回执与宿主完成通知对齐。分支的完成通知正文由宿主自动送回 primary，
+        // 与本工具提交的 summary 是两套内容。附一个 structured_result 指针（提交会话 = 分支 sid），
+        // 让 primary 裁定时能按这个 id 找到对应分支的完成通知去交叉核对，免得只看 summary 漏掉结果。
+        return {
+          ok: true,
+          receipt: r.receipt,
+          structured_result: { source_session_id: hostSid, task_id: args.task_id, note: '宿主完成通知由该分支自动送回 primary；裁定前请与回执 summary 交叉核对' },
+          message: '回执已提交（submitted），待 primary 裁定；裁定前请对照该分支的宿主完成通知正文',
+        }
       } catch (e) { return { ok: false, error: e && e.code ? e.code : 'RECEIPT_SUBMIT_FAILED', message: String(e && e.message ? e.message : e) } }
     },
   })
@@ -516,7 +609,7 @@ export function registerAgentTools(ctx, deps) {
   // ---- 0.19 权威写：primary 裁定回执 ----
   reg({
     name: 'task_receipt_decide',
-    description: '裁定一份任务回执（受控写，只有 primary 能调）：accepted 或 rejected。这是正式任务状态的唯一入口——分支提交回执后任务停在"做完待验"，只有这里确认后才 accepted、任务才 closed。裁定前请核对回执内容与交付物；裁定后回执不可再改。不要用于自我审批。',
+    description: '裁定一份任务回执（受控写，只有 primary 能调）：accepted 或 rejected。这是正式任务状态的唯一入口——分支提交回执后任务停在"做完待验"，只有这里确认后才 accepted、任务才 closed。裁定前请核对回执内容与交付物：若该分支由 task_dispatch_spawn 创建，宿主还会自动送回一份子 agent 完成通知，请与回执 summary 交叉对照，两者一致再接受；回执返回的 structured_result.source_session_id 可用于定位该分支。裁定后回执不可再改。不要用于自我审批。',
     parameters: {
       receipt_id: { type: 'string', description: '回执 id（rcp_…）' },
       decision: { type: 'string', description: 'accepted 或 rejected' },
