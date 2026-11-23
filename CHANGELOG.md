@@ -17,13 +17,14 @@
 - **P0-1 `task_dispatch_spawn` 工具**：主对话一句话派活给全新分支——一次调用完成 `spawn（ctx.subagents.startActivation，parent=exec.agent）→ linkSession（自动挂 supporting）→ createTask + assignTask（派给该子会话）`，免除"手动开对话→聊一轮→挂项目→指出是哪个会话"四步。parent 用宿主注入的活 `exec.agent`（不伪造，静态证实过宿主校验 `get(id)===parent`）；`subagents` 走软探测（`ctx.get`，不写进硬 inject，无该服务的 profile 仍只跑面板）；任一步失败自动 `dispose()` 子 agent 回滚、不留孤儿；写路径全复用现有 store 服务与授权闸（primary-only、assignTask 校验 supporting），未放宽任何权限。
 - **P0-2 回执与完成通知对齐**：`task_receipt_submit` 返回新增 `structured_result`（source_session_id=分支 sid + task_id），primary 可据此定位该分支的宿主完成通知与回执 summary 交叉核对；`task_receipt_decide` 描述提示"两者一致再接受"。仅加指针与提示，不改回执状态机。
 - **测试**：新增 s45-dispatch-spawn（10/10：注册/缺参/越权回滚/成功链/派单/startActivation 形状/挂 supporting/spawn 抛错/无 childId 回滚/structured_result）；s44 T0 工具计数 12→13；三个测试脚本追加 s45。全量 test:full 38 套全绿。
-- **状态**：`Implemented`，非 `Verified`——Host 半（agent-tools.mjs/index.js）改动需使用者重启 DSH 才生效；真机验证清单见实施报告。未推远端、未建 Release、未改正式数据域与台账。
+- **状态**：**Verified**（2026-11-23 真机跑通）——使用者重启 DSH 后主对话实调 `task_dispatch_spawn`：返回 `child_session_id=session-<uuid>`（不再 RECORD_INVALID）→ 自动挂 supporting → 子会话收件箱收到任务 → 子 agent 交回执 `source_session_id` 与 child_session_id 完全一致（回执对得上）→ `structured_result` 指针生效。全链真机验证通过，详见 `_会话/20261123-派活自动化落地/实施报告.md`。
 
 ### 修订（真机验证失败后的 childId 格式修复）
 
 - **问题**：使用者重启后主对话实调 `task_dispatch_spawn` 返回 `RECORD_INVALID`——宿主 `startActivation` 默认 childId 是裸 UUID（`dsh-subagent/manager.ts:335` `randomUUID()`，`sessions.prepare:1244` 原样使用，不带 `session-` 前缀），过不了本项目 store 的 `^session-[0-9a-f-]+$` schema；且子 agent 交回执时 `resolveHostSessionId` 正则也拒裸 UUID（source_session_id 对不上）。`dispose` 回滚生效、无孤儿。
 - **修复**：`task_dispatch_spawn` 在 `startActivation` 时自带 `childId:'session-'+randomUUID()`（spec.childId 路径原样采用、`sessionIdSchema=z.string()` 无格式约束、只查重复），从源头让子会话 id 带前缀——一处解决"挂得上"与"回执对得上"，不放宽 store schema。宿主返回 childId 与请求不一致时拒绝继续（CHILD_ID_MISMATCH），杜绝半成品。
 - **测试**：s45 加 T6b（childId 满足正则且原样回显）、T6c（子 agent 用该 sid 提交回执成功），10→12/12；全量 test:full 38 套仍全绿。仍在 v0.22.0 内，不跨档跳版本。
+- **真机**：修复后重启实调，全链通过（建分支→挂 supporting→派单→交回执且 sid 对齐），状态转 Verified；详见上方状态行与实施报告。
 
 ## [0.21.0] - 2026-11-21
 
